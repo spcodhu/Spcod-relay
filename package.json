@@ -1,0 +1,22 @@
+{
+  "name": "@spcode/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Spcode 远程控制零知识哑中继——只路由加密 blob，不见明文",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.9.2",
+    "vitest": "^5.0.2"
+  }
+}
