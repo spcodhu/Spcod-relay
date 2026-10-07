@@ -57,8 +57,8 @@ const MIME: Record<string, string> = {
 };
 
 const NO_STATIC_PAGE = `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<title>Spcode Relay</title><body style="font-family:system-ui;max-width:40em;margin:4em auto;padding:0 1em">
-<h1>Spcode Relay 运行中</h1>
+<title>Spcod Relay</title><body style="font-family:system-ui;max-width:40em;margin:4em auto;padding:0 1em">
+<h1>Spcod Relay 运行中</h1>
 <p>这是一个零知识哑中继：它只按 channel 路由端到端加密的数据，看不到任何明文内容。</p>
 <p>此实例未托管手机端 PWA（STATIC_DIR 不存在）。请在客户端中直接填入本 relay 地址，或部署 PWA 构建产物后刷新。</p>
 </body></html>`;
