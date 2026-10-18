@@ -210,3 +210,58 @@ describe("channel 回收", () => {
     expect(core.channelCount()).toBe(0); // 队列已排空
   });
 });
+
+describe("评审 R3-C9：配额与按设备分槽", () => {
+  it("host→device 离线帧按 deviceId 分槽：A 上线只收 A 的，B 的留队", () => {
+    const core = new RelayCore();
+    const host = new FakeConn("host");
+    core.connect(CID, "host", host);
+    // 无设备在线：帧按外层 deviceId 入各自槽位
+    core.message(CID, host, JSON.stringify({ t: "encrypted", deviceId: "devA", c: "a1" }));
+    core.message(CID, host, JSON.stringify({ t: "encrypted", deviceId: "devB", c: "b1" }));
+    core.message(CID, host, JSON.stringify({ t: "pair_ack", ok: true })); // 无 deviceId → "*" 槽
+
+    const devA = new FakeConn("device");
+    core.connect(CID, "device", devA, { deviceId: "devA" });
+    // A 收到自己槽位的 a1 + "*" 槽的 pair_ack；B 的 b1 不动
+    expect(devA.frames().map((f) => JSON.parse(f).c ?? JSON.parse(f).t)).toEqual(["a1", "pair_ack"]);
+
+    const devB = new FakeConn("device");
+    core.connect(CID, "device", devB, { deviceId: "devB" });
+    expect(devB.frames().map((f) => JSON.parse(f).c)).toEqual(["b1"]);
+  });
+
+  it("channel 数上限：超出拒绝新 channel（4013 server_full）", () => {
+    const core = new RelayCore({ maxChannels: 1 });
+    const a = new FakeConn("host");
+    expect(core.connect(CID, "host", a).ok).toBe(true);
+    const other = new FakeConn("host");
+    const CID2 = "b".repeat(64);
+    const r = core.connect(CID2, "host", other);
+    expect(r).toEqual({ ok: false, reason: "server_full" });
+    expect(other.closedWith).toBe(4013);
+  });
+
+  it("设备数上限：超出以 4002 拒绝", () => {
+    const core = new RelayCore({ maxDevices: 2 });
+    const host = new FakeConn("host");
+    core.connect(CID, "host", host);
+    expect(core.connect(CID, "device", new FakeConn("device")).ok).toBe(true);
+    expect(core.connect(CID, "device", new FakeConn("device")).ok).toBe(true);
+    const third = new FakeConn("device");
+    expect(core.connect(CID, "device", third).ok).toBe(false);
+    expect(third.closedWith).toBe(4002);
+  });
+
+  it("全局字节预算：超出后拒入队", () => {
+    const core = new RelayCore({ queueMax: 100, queueBytesMax: 64 });
+    const dev = new FakeConn("device");
+    core.connect(CID, "device", dev);
+    core.message(CID, dev, "x".repeat(40)); // 40B
+    core.message(CID, dev, "y".repeat(40)); // 累计 80B > 64B → 拒
+    expect(dev.errors()).toEqual(["channel_full"]);
+    const host = new FakeConn("host");
+    core.connect(CID, "host", host);
+    expect(host.frames()).toHaveLength(1);
+  });
+});

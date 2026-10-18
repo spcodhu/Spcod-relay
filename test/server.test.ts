@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -94,6 +95,22 @@ describe("HTTP 服务", () => {
     expect(await spa.text()).toBe("<h1>pwa</h1>");
     const evil = await fetch(`http://${base}/../../etc/passwd`);
     expect(await evil.text()).toBe("<h1>pwa</h1>");
+  });
+
+  it("畸形 URL（GET /%）返回 400 而不是打崩进程（评审 R3-C9）", async () => {
+    // 原生 http 客户端绕过 fetch 的 URL 预解析（fetch 自己会拒），直发畸形请求行
+    const res = await new Promise<{ status: number }>((resolvePromise, rejectPromise) => {
+      const req = httpRequest(`http://${base}/%`, (r) => {
+        r.resume();
+        resolvePromise({ status: r.statusCode ?? 0 });
+      });
+      req.on("error", rejectPromise);
+      req.end();
+    });
+    expect(res.status).toBe(400);
+    // 进程还活着：health 正常
+    const health = await fetch(`http://${base}/health`);
+    expect(health.status).toBe(200);
   });
 });
 

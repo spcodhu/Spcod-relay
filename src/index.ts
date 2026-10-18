@@ -14,6 +14,12 @@ export interface RelayConfig {
   queueTtlMs: number;
   frameMaxBytes: number;
   ratePerSec: number;
+  /** 全局 channel 数上限（任意 64-hex 即建 channel 是 DoS 面） */
+  maxChannels: number;
+  /** 每 channel 设备数上限 */
+  maxDevices: number;
+  /** 全局离线队列总字节预算 */
+  queueBytesMax: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
@@ -28,6 +34,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     queueTtlMs: int(env.QUEUE_TTL_HOURS, 72) * 3600 * 1000,
     frameMaxBytes: 256 * 1024,
     ratePerSec: 60,
+    maxChannels: int(env.MAX_CHANNELS, 1024),
+    maxDevices: int(env.MAX_DEVICES_PER_CHANNEL, 16),
+    queueBytesMax: int(env.QUEUE_BYTES_MAX_MB, 32) * 1024 * 1024,
   };
 }
 
@@ -69,62 +78,80 @@ export function createRelayServer(config: RelayConfig): RelayServer {
     queueTtlMs: config.queueTtlMs,
     frameMaxBytes: config.frameMaxBytes,
     ratePerSec: config.ratePerSec,
+    maxChannels: config.maxChannels,
+    maxDevices: config.maxDevices,
+    queueBytesMax: config.queueBytesMax,
   });
   const staticDir = path.resolve(config.staticDir);
   const hasStatic = existsSync(staticDir) && statSync(staticDir).isDirectory();
 
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    // 评审 R3-C9：decodeURIComponent/URL 解析必须容错——`GET /%` 曾是未捕获异常直接打崩进程
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost");
 
-    if (url.pathname === "/health") {
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, channels: core.channelCount() }));
-      return;
-    }
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      res.writeHead(405).end();
-      return;
-    }
-    if (!hasStatic) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(NO_STATIC_PAGE);
-      return;
-    }
+      if (url.pathname === "/health") {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, channels: core.channelCount() }));
+        return;
+      }
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        res.writeHead(405).end();
+        return;
+      }
+      if (!hasStatic) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(NO_STATIC_PAGE);
+        return;
+      }
 
-    // 静态资源；防目录穿越；找不到时 SPA fallback 到 index.html
-    let filePath = path.join(staticDir, path.normalize(decodeURIComponent(url.pathname)));
-    if (!filePath.startsWith(staticDir + path.sep)) filePath = path.join(staticDir, "index.html");
-    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-      filePath = path.join(staticDir, "index.html");
+      // 静态资源；防目录穿越；找不到时 SPA fallback 到 index.html
+      let filePath = path.join(staticDir, path.normalize(decodeURIComponent(url.pathname)));
+      if (!filePath.startsWith(staticDir + path.sep)) filePath = path.join(staticDir, "index.html");
+      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+        filePath = path.join(staticDir, "index.html");
+      }
+      if (!existsSync(filePath)) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(NO_STATIC_PAGE);
+        return;
+      }
+      res.writeHead(200, { "content-type": MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream" });
+      if (req.method === "HEAD") res.end();
+      else createReadStream(filePath).pipe(res);
+    } catch {
+      // 畸形请求（非法 % 转义、坏 URL）：400 而不是进程崩溃
+      if (!res.headersSent) res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Bad Request");
     }
-    if (!existsSync(filePath)) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(NO_STATIC_PAGE);
-      return;
-    }
-    res.writeHead(200, { "content-type": MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream" });
-    if (req.method === "HEAD") res.end();
-    else createReadStream(filePath).pipe(res);
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: config.frameMaxBytes });
 
   server.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const m = /^\/channel\/([^/?]+)$/.exec(url.pathname);
-    const channelId = m?.[1] ?? "";
-    const role = url.searchParams.get("role") ?? "";
-    if (!CHANNEL_ID_RE.test(channelId) || (role !== "host" && role !== "device")) {
-      socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    // 畸形请求不能打崩进程（评审 R3-C9）
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const m = /^\/channel\/([^/?]+)$/.exec(url.pathname);
+      const channelId = m?.[1] ?? "";
+      const role = url.searchParams.get("role") ?? "";
+      // 设备可声明 deviceId（离线队列按设备分槽补投；缺省兼容旧客户端，收 "*" 槽）
+      const deviceId = url.searchParams.get("device") ?? undefined;
+      const safeDeviceId = deviceId && /^[A-Za-z0-9_-]{1,64}$/.test(deviceId) ? deviceId : undefined;
+      if (!CHANNEL_ID_RE.test(channelId) || (role !== "host" && role !== "device")) {
+        socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        attach(channelId, role as Role, ws, safeDeviceId);
+      });
+    } catch {
       socket.destroy();
-      return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      attach(channelId, role as Role, ws);
-    });
   });
 
-  function attach(channelId: string, role: Role, ws: WebSocket): void {
+  function attach(channelId: string, role: Role, ws: WebSocket, deviceId?: string): void {
     const conn: Conn = {
       role,
       send: (data) => {
@@ -132,7 +159,7 @@ export function createRelayServer(config: RelayConfig): RelayServer {
       },
       close: (code, reason) => ws.close(code, reason),
     };
-    const result = core.connect(channelId, role, conn);
+    const result = core.connect(channelId, role, conn, { deviceId });
     if (!result.ok) return; // host 冲突：core 已以 4001 关闭
     ws.on("message", (data, isBinary) => {
       if (isBinary) {
