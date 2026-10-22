@@ -65,12 +65,31 @@ const MIME: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-const NO_STATIC_PAGE = `<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+const FALLBACK_TEXT = {
+  "zh-CN": {
+    title: "Spcod Relay 运行中",
+    privacy: "这是一个零知识哑中继：它只按通道转发端到端加密的数据，看不到任何明文内容。",
+    missing: "此实例未托管手机端 PWA（STATIC_DIR 不存在）。请在客户端中填入本中继地址，或部署 PWA 构建产物后刷新。",
+  },
+  en: {
+    title: "Spcod Relay is running",
+    privacy: "This zero-knowledge relay forwards end-to-end encrypted data by channel. It cannot read the contents.",
+    missing:
+      "This instance does not host the mobile PWA (STATIC_DIR is missing). Enter this relay address in your client, or deploy the PWA build and refresh.",
+  },
+};
+
+export function fallbackPage(acceptLanguage = ""): string {
+  const preferred = acceptLanguage
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .find((value) => /^(?:zh|en)(?:[-;]|$)/.test(value));
+  const locale = preferred?.startsWith("en") ? "en" : "zh-CN";
+  const text = FALLBACK_TEXT[locale];
+  return `<!doctype html><html lang="${locale}"><meta charset="utf-8">
 <title>Spcod Relay</title><body style="font-family:system-ui;max-width:40em;margin:4em auto;padding:0 1em">
-<h1>Spcod Relay 运行中</h1>
-<p>这是一个零知识哑中继：它只按 channel 路由端到端加密的数据，看不到任何明文内容。</p>
-<p>此实例未托管手机端 PWA（STATIC_DIR 不存在）。请在客户端中直接填入本 relay 地址，或部署 PWA 构建产物后刷新。</p>
-</body></html>`;
+<h1>${text.title}</h1><p>${text.privacy}</p><p>${text.missing}</p></body></html>`;
+}
 
 export function createRelayServer(config: RelayConfig): RelayServer {
   const core = new RelayCore({
@@ -101,7 +120,7 @@ export function createRelayServer(config: RelayConfig): RelayServer {
       }
       if (!hasStatic) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end(NO_STATIC_PAGE);
+        res.end(fallbackPage(req.headers["accept-language"]));
         return;
       }
 
@@ -113,7 +132,7 @@ export function createRelayServer(config: RelayConfig): RelayServer {
       }
       if (!existsSync(filePath)) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end(NO_STATIC_PAGE);
+        res.end(fallbackPage(req.headers["accept-language"]));
         return;
       }
       res.writeHead(200, { "content-type": MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream" });

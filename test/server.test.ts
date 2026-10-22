@@ -121,6 +121,11 @@ describe("无静态目录时", () => {
       const res = await fetch(`http://${base}/`);
       expect(res.status).toBe(200);
       expect(await res.text()).toContain("零知识哑中继");
+      const english = await fetch(`http://${base}/`, { headers: { "accept-language": "en-US,en;q=0.9" } });
+      const page = await english.text();
+      expect(page).toContain('lang="en"');
+      expect(page).not.toMatch(/[\u4e00-\u9fff]/);
+      expect(page).toContain("zero-knowledge relay");
     } finally {
       await relay.close();
     }
