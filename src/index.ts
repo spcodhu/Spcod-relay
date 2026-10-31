@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { CHANNEL_ID_RE, type Conn, RelayCore, type Role } from "./channel.js";
+import { RELAY_PROTOCOL_VERSION, RELAY_TICKET_PATH } from "./protocol.js";
+import { parseTicketBody } from "./ticket-request.js";
+import { TicketService } from "./tickets.js";
 
-/** 日志纪律：relay 只记录元数据（连接/端口/数量），绝不记录帧内容。 */
-
+/** 日志纪律：只记录元数据，绝不记录帧、ticket、访问密钥或查询字符串。 */
 export interface RelayConfig {
   port: number;
   staticDir: string;
@@ -14,12 +16,19 @@ export interface RelayConfig {
   queueTtlMs: number;
   frameMaxBytes: number;
   ratePerSec: number;
-  /** 全局 channel 数上限（任意 64-hex 即建 channel 是 DoS 面） */
   maxChannels: number;
-  /** 每 channel 设备数上限 */
   maxDevices: number;
-  /** 全局离线队列总字节预算 */
   queueBytesMax: number;
+  /** 自托管可选共享访问密钥；缺省为官方匿名票据模式。 */
+  accessKey?: string | null;
+  /** 迁移期兼容无 ticket 客户端；配置访问密钥时始终强制票据。 */
+  allowLegacyWs?: boolean;
+  /** 除 same-origin 外，允许调用票据 API/WS 的 PWA origins。 */
+  corsAllowedOrigins?: string[];
+  heartbeatMs?: number;
+  maxBufferedBytes?: number;
+  ticketRatePerMin?: number;
+  trustProxy?: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
@@ -27,6 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
   };
+  const bool = (v: string | undefined, dflt: boolean): boolean => (v == null ? dflt : v === "true");
   return {
     port: int(env.PORT, 8787),
     staticDir: env.STATIC_DIR ?? "./public",
@@ -37,6 +47,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     maxChannels: int(env.MAX_CHANNELS, 1024),
     maxDevices: int(env.MAX_DEVICES_PER_CHANNEL, 16),
     queueBytesMax: int(env.QUEUE_BYTES_MAX_MB, 32) * 1024 * 1024,
+    accessKey: env.RELAY_ACCESS_KEY?.trim() || null,
+    allowLegacyWs: bool(env.ALLOW_LEGACY_WS, true),
+    corsAllowedOrigins: (env.CORS_ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+    heartbeatMs: int(env.HEARTBEAT_MS, 30_000),
+    maxBufferedBytes: int(env.MAX_BUFFERED_BYTES, 1024 * 1024),
+    ticketRatePerMin: int(env.TICKET_RATE_PER_MIN, 60),
+    trustProxy: bool(env.TRUST_PROXY, false),
   };
 }
 
@@ -65,6 +85,15 @@ const MIME: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+const SECURITY_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "x-frame-options": "DENY",
+  "cross-origin-opener-policy": "same-origin",
+};
+
 const FALLBACK_TEXT = {
   "zh-CN": {
     title: "Spcod Relay 运行中",
@@ -91,6 +120,56 @@ export function fallbackPage(acceptLanguage = ""): string {
 <h1>${text.title}</h1><p>${text.privacy}</p><p>${text.missing}</p></body></html>`;
 }
 
+function json(res: http.ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", ...SECURITY_HEADERS, ...headers });
+  res.end(JSON.stringify(value));
+}
+
+function originAllowed(origin: string | undefined, host: string | undefined, allowed: string[]): boolean {
+  if (!origin) return true;
+  try {
+    const url = new URL(origin);
+    if ((url.protocol === "http:" || url.protocol === "https:") && host && url.host === host) return true;
+  } catch {
+    return false;
+  }
+  return allowed.includes(origin);
+}
+
+function corsHeaders(origin: string | undefined): Record<string, string> {
+  return origin
+    ? {
+        "access-control-allow-origin": origin,
+        "access-control-allow-headers": "authorization,content-type",
+        "access-control-allow-methods": "POST,OPTIONS",
+        vary: "Origin",
+      }
+    : {};
+}
+
+async function readJson(req: http.IncomingMessage, limit = 16 * 1024): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buf.length;
+    if (size > limit) throw new Error("body_too_large");
+    chunks.push(buf);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+}
+
+export function sendWithBackpressure(ws: WebSocket, data: string, maxBufferedBytes: number): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount > maxBufferedBytes) {
+    ws.terminate(); // 慢消费者无法完成优雅关闭握手，直接断开并触发客户端补拉
+    return;
+  }
+  ws.send(data, (error) => {
+    if (error) ws.terminate();
+  });
+}
+
 export function createRelayServer(config: RelayConfig): RelayServer {
   const core = new RelayCore({
     queueMax: config.queueMax,
@@ -103,68 +182,116 @@ export function createRelayServer(config: RelayConfig): RelayServer {
   });
   const staticDir = path.resolve(config.staticDir);
   const hasStatic = existsSync(staticDir) && statSync(staticDir).isDirectory();
+  const tickets = new TicketService(config.accessKey ?? null);
+  const allowedOrigins = config.corsAllowedOrigins ?? [];
+  const allowLegacyWs = config.allowLegacyWs ?? true;
+  const heartbeatMs = config.heartbeatMs ?? 30_000;
+  const maxBufferedBytes = config.maxBufferedBytes ?? 1024 * 1024;
+  const ticketRatePerMin = config.ticketRatePerMin ?? 60;
+  const ticketAttempts = new Map<string, { count: number; resetAt: number }>();
 
-  const server = http.createServer((req, res) => {
-    // 评审 R3-C9：decodeURIComponent/URL 解析必须容错——`GET /%` 曾是未捕获异常直接打崩进程
+  function requestIp(req: http.IncomingMessage): string {
+    if (config.trustProxy) {
+      const forwarded = req.headers["x-forwarded-for"];
+      const value = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+      if (value) return value.split(",")[0]!.trim();
+    }
+    return req.socket.remoteAddress ?? "unknown";
+  }
+
+  function ticketRateAllowed(ip: string): boolean {
+    const now = Date.now();
+    const current = ticketAttempts.get(ip);
+    if (!current || current.resetAt <= now) {
+      ticketAttempts.set(ip, { count: 1, resetAt: now + 60_000 });
+      return true;
+    }
+    if (current.count >= ticketRatePerMin) return false;
+    current.count += 1;
+    return true;
+  }
+
+  async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
-
       if (url.pathname === "/health") {
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, channels: core.channelCount() }));
+        json(res, 200, { ok: true, version: RELAY_PROTOCOL_VERSION });
         return;
       }
+      if (url.pathname === RELAY_TICKET_PATH && req.method === "OPTIONS") {
+        const origin = req.headers.origin;
+        if (!originAllowed(origin, req.headers.host, allowedOrigins)) return json(res, 403, { error: "origin_denied" });
+        res.writeHead(204, { ...SECURITY_HEADERS, ...corsHeaders(origin) });
+        res.end();
+        return;
+      }
+      if (url.pathname === RELAY_TICKET_PATH && req.method === "POST") {
+        const origin = req.headers.origin;
+        if (!originAllowed(origin, req.headers.host, allowedOrigins)) return json(res, 403, { error: "origin_denied" });
+        if (!ticketRateAllowed(requestIp(req))) return json(res, 429, { error: "rate_limited" }, corsHeaders(origin));
+        try {
+          const binding = parseTicketBody(await readJson(req));
+          if (!binding) return json(res, 400, { error: "bad_request" }, corsHeaders(origin));
+          const result = tickets.issue(binding, req.headers.authorization);
+          if (!result.ok) return json(res, 401, { error: result.error }, corsHeaders(origin));
+          return json(res, 200, result.grant, corsHeaders(origin));
+        } catch {
+          return json(res, 400, { error: "bad_request" }, corsHeaders(origin));
+        }
+      }
       if (req.method !== "GET" && req.method !== "HEAD") {
-        res.writeHead(405).end();
+        res.writeHead(405, SECURITY_HEADERS).end();
         return;
       }
       if (!hasStatic) {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS });
         res.end(fallbackPage(req.headers["accept-language"]));
         return;
       }
 
-      // 静态资源；防目录穿越；找不到时 SPA fallback 到 index.html
       let filePath = path.join(staticDir, path.normalize(decodeURIComponent(url.pathname)));
       if (!filePath.startsWith(staticDir + path.sep)) filePath = path.join(staticDir, "index.html");
-      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-        filePath = path.join(staticDir, "index.html");
-      }
+      if (!existsSync(filePath) || !statSync(filePath).isFile()) filePath = path.join(staticDir, "index.html");
       if (!existsSync(filePath)) {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS });
         res.end(fallbackPage(req.headers["accept-language"]));
         return;
       }
-      res.writeHead(200, { "content-type": MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream" });
+      res.writeHead(200, {
+        "content-type": MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream",
+        ...SECURITY_HEADERS,
+      });
       if (req.method === "HEAD") res.end();
       else createReadStream(filePath).pipe(res);
     } catch {
-      // 畸形请求（非法 % 转义、坏 URL）：400 而不是进程崩溃
-      if (!res.headersSent) res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      if (!res.headersSent) res.writeHead(400, { "content-type": "text/plain; charset=utf-8", ...SECURITY_HEADERS });
       res.end("Bad Request");
     }
-  });
+  }
 
+  const server = http.createServer((req, res) => void handleHttp(req, res));
   const wss = new WebSocketServer({ noServer: true, maxPayload: config.frameMaxBytes });
+  const alive = new WeakMap<WebSocket, boolean>();
 
   server.on("upgrade", (req, socket, head) => {
-    // 畸形请求不能打崩进程（评审 R3-C9）
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const m = /^\/channel\/([^/?]+)$/.exec(url.pathname);
       const channelId = m?.[1] ?? "";
       const role = url.searchParams.get("role") ?? "";
-      // 设备可声明 deviceId（离线队列按设备分槽补投；缺省兼容旧客户端，收 "*" 槽）
       const deviceId = url.searchParams.get("device") ?? undefined;
       const safeDeviceId = deviceId && /^[A-Za-z0-9_-]{1,64}$/.test(deviceId) ? deviceId : undefined;
-      if (!CHANNEL_ID_RE.test(channelId) || (role !== "host" && role !== "device")) {
-        socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+      const reject = (status: number, text: string) => {
+        socket.write(`HTTP/1.1 ${status} ${text}\r\n\r\n`);
         socket.destroy();
-        return;
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        attach(channelId, role as Role, ws, safeDeviceId);
-      });
+      };
+      if (!originAllowed(req.headers.origin, req.headers.host, allowedOrigins)) return reject(403, "Forbidden");
+      if (!CHANNEL_ID_RE.test(channelId) || (role !== "host" && role !== "device")) return reject(400, "Bad Request");
+      const binding = { channelId, role: role as Role, ...(safeDeviceId ? { deviceId: safeDeviceId } : {}) };
+      const ticket = url.searchParams.get("ticket") ?? "";
+      const ticketAccepted = ticket && tickets.consume(ticket, binding);
+      if ((config.accessKey || !allowLegacyWs) && !ticketAccepted) return reject(401, "Unauthorized");
+      wss.handleUpgrade(req, socket, head, (ws) => attach(channelId, role as Role, ws, safeDeviceId));
     } catch {
       socket.destroy();
     }
@@ -173,13 +300,14 @@ export function createRelayServer(config: RelayConfig): RelayServer {
   function attach(channelId: string, role: Role, ws: WebSocket, deviceId?: string): void {
     const conn: Conn = {
       role,
-      send: (data) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(data);
-      },
+      ...(deviceId ? { deviceId } : {}),
+      send: (data) => sendWithBackpressure(ws, data, maxBufferedBytes),
       close: (code, reason) => ws.close(code, reason),
     };
     const result = core.connect(channelId, role, conn, { deviceId });
-    if (!result.ok) return; // host 冲突：core 已以 4001 关闭
+    if (!result.ok) return;
+    alive.set(ws, true);
+    ws.on("pong", () => alive.set(ws, true));
     ws.on("message", (data, isBinary) => {
       if (isBinary) {
         conn.send(JSON.stringify({ t: "relay.error", error: "invalid_frame" }));
@@ -191,9 +319,23 @@ export function createRelayServer(config: RelayConfig): RelayServer {
     ws.on("error", () => core.disconnect(channelId, conn));
   }
 
-  // 过期帧清理（不阻止进程退出）
-  const sweeper = setInterval(() => core.sweep(), 60_000);
+  const sweeper = setInterval(() => {
+    core.sweep();
+    const now = Date.now();
+    for (const [ip, value] of ticketAttempts) if (value.resetAt <= now) ticketAttempts.delete(ip);
+  }, 60_000);
   sweeper.unref();
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (alive.get(ws) === false) {
+        ws.terminate();
+        continue;
+      }
+      alive.set(ws, false);
+      ws.ping();
+    }
+  }, heartbeatMs);
+  heartbeat.unref();
 
   return {
     server,
@@ -201,18 +343,23 @@ export function createRelayServer(config: RelayConfig): RelayServer {
     close: () =>
       new Promise((resolve) => {
         clearInterval(sweeper);
+        clearInterval(heartbeat);
         for (const ws of wss.clients) ws.terminate();
         wss.close(() => server.close(() => resolve()));
       }),
   };
 }
 
-// 直接运行（node dist/index.js）时启动服务
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 if (isMain) {
   const config = loadConfig();
-  const { server } = createRelayServer(config);
+  const { server, close } = createRelayServer(config);
   server.listen(config.port, () => {
     console.log(`[relay] listening on :${config.port} static=${path.resolve(config.staticDir)}`);
   });
+  const shutdown = () => {
+    void close().then(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 }

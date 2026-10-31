@@ -80,13 +80,15 @@ describe("HTTP 服务", () => {
   it("GET /health 返回 ok 与活跃 channel 数", async () => {
     const res = await fetch(`http://${base}/health`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, channels: 0 });
+    expect(await res.json()).toEqual({ ok: true, version: 2 });
   });
 
   it("静态资源按 MIME 服务", async () => {
     const res = await fetch(`http://${base}/app.js`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("javascript");
+    expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await res.text()).toBe("console.log(1)");
   });
 
@@ -153,11 +155,11 @@ describe("WebSocket 协议", () => {
   it("host↔device 全链路：hello 在前，业务帧原样送达", async () => {
     const host = await connect(base, `/channel/${CID}?role=host`);
     const helloHost = JSON.parse(await host.next());
-    expect(helloHost).toEqual({ t: "relay.hello", role: "host", queued: 0 });
+    expect(helloHost).toEqual({ t: "relay.hello", role: "host", queued: 0, version: 2 });
 
     const dev = await connect(base, `/channel/${CID}?role=device`);
     const helloDev = JSON.parse(await dev.next());
-    expect(helloDev).toEqual({ t: "relay.hello", role: "device", queued: 0 });
+    expect(helloDev).toEqual({ t: "relay.hello", role: "device", queued: 0, version: 2 });
 
     const frame = JSON.stringify({ id: "x", seq: 1, t: "encrypted", c: "AA==" });
     const got = dev.next();
@@ -194,11 +196,60 @@ describe("WebSocket 协议", () => {
 
     const host = await connect(base, `/channel/${cid}?role=host`);
     const hello = JSON.parse(await host.next());
-    expect(hello).toEqual({ t: "relay.hello", role: "host", queued: 1 });
+    expect(hello).toEqual({ t: "relay.hello", role: "host", queued: 1, version: 2 });
     expect(await host.next()).toBe("offline-1");
 
     host.ws.close();
     dev.ws.close();
     await Promise.all([host.closed, dev.closed]);
+  });
+});
+
+describe("票据与生产连接治理", () => {
+  it("访问密钥 → 单次 ticket 建连；无 ticket 与重放均拒绝", async () => {
+    const { relay, base } = await start(config({ accessKey: "secret" }));
+    try {
+      const body = JSON.stringify({ channelId: CID, role: "device", deviceId: "phone" });
+      const denied = await fetch(`http://${base}/v1/tickets`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(denied.status).toBe(401);
+      const issued = await fetch(`http://${base}/v1/tickets`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer secret" },
+        body,
+      });
+      expect(issued.status).toBe(200);
+      const grant = (await issued.json()) as { ticket: string; expiresAt: number };
+      expect(grant.ticket).toBeTruthy();
+      const dev = await connect(base, `/channel/${CID}?role=device&device=phone&ticket=${encodeURIComponent(grant.ticket)}`);
+      expect(JSON.parse(await dev.next())).toMatchObject({ t: "relay.hello", version: 2 });
+      dev.ws.close();
+      await dev.closed;
+      await expect(
+        connect(base, `/channel/${CID}?role=device&device=phone&ticket=${encodeURIComponent(grant.ticket)}`),
+      ).rejects.toThrow(/401/);
+      await expect(connect(base, `/channel/${CID}?role=device`)).rejects.toThrow(/401/);
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("ping/pong 保持活跃连接", async () => {
+    const { relay, base } = await start(config({ heartbeatMs: 20 }));
+    try {
+      const host = await connect(base, `/channel/${CID}?role=host`);
+      await host.next();
+      const dev = await connect(base, `/channel/${CID}?role=device`);
+      await dev.next();
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      expect(dev.ws.readyState).toBe(WebSocket.OPEN);
+      host.ws.terminate();
+      dev.ws.terminate();
+    } finally {
+      await relay.close();
+    }
   });
 });
