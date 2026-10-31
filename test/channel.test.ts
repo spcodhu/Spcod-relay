@@ -6,7 +6,7 @@ const CID = "a".repeat(64);
 class FakeConn implements Conn {
   messages: string[] = [];
   closedWith: number | undefined;
-  constructor(public role: Role) {}
+  constructor(public role: Role, public deviceId?: string) {}
   send(data: string): void {
     this.messages.push(data);
   }
@@ -62,7 +62,7 @@ describe("channel 路由", () => {
     const core = new RelayCore();
     const host = new FakeConn("host");
     core.connect(CID, "host", host);
-    expect(host.hello()).toEqual({ t: "relay.hello", role: "host", queued: 0 });
+    expect(host.hello()).toEqual({ t: "relay.hello", role: "host", queued: 0, version: 2 });
   });
 });
 
@@ -76,7 +76,7 @@ describe("离线队列", () => {
 
     const host = new FakeConn("host");
     core.connect(CID, "host", host);
-    expect(host.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "host", queued: 2 }), "m1", "m2"]);
+    expect(host.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "host", queued: 2, version: 2 }), "m1", "m2"]);
   });
 
   it("无 device 时缓存 host→device 帧，首个 device 上线补投", () => {
@@ -87,7 +87,7 @@ describe("离线队列", () => {
 
     const dev = new FakeConn("device");
     core.connect(CID, "device", dev);
-    expect(dev.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "device", queued: 1 }), "h1"]);
+    expect(dev.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "device", queued: 1, version: 2 }), "h1"]);
 
     // 队列已排空，第二个 device 不再收到补投
     const dev2 = new FakeConn("device");
@@ -263,5 +263,44 @@ describe("评审 R3-C9：配额与按设备分槽", () => {
     const host = new FakeConn("host");
     core.connect(CID, "host", host);
     expect(host.frames()).toHaveLength(1);
+  });
+});
+
+describe("多设备定向队列与连接替换", () => {
+  it("A 在线不吞 B 的帧：B 在线定向直发，B 离线独立入队", () => {
+    const core = new RelayCore();
+    const host = new FakeConn("host");
+    const a = new FakeConn("device", "devA");
+    const b = new FakeConn("device", "devB");
+    core.connect(CID, "host", host);
+    core.connect(CID, "device", a, { deviceId: "devA" });
+    core.connect(CID, "device", b, { deviceId: "devB" });
+    const online = JSON.stringify({ t: "encrypted", deviceId: "devB", c: "online" });
+    core.message(CID, host, online);
+    expect(a.frames()).toEqual([]);
+    expect(b.frames()).toEqual([online]);
+
+    core.disconnect(CID, b);
+    const offline = JSON.stringify({ t: "encrypted", deviceId: "devB", c: "offline" });
+    core.message(CID, host, offline);
+    expect(a.frames()).toEqual([]);
+    const reconnected = new FakeConn("device", "devB");
+    core.connect(CID, "device", reconnected, { deviceId: "devB" });
+    expect(reconnected.hello().queued).toBe(1);
+    expect(reconnected.frames()).toEqual([offline]);
+  });
+
+  it("同 deviceId 新连接替换旧连接，旧连接以 4003 关闭且不再收帧", () => {
+    const core = new RelayCore();
+    const host = new FakeConn("host");
+    const old = new FakeConn("device", "devA");
+    const next = new FakeConn("device", "devA");
+    core.connect(CID, "host", host);
+    core.connect(CID, "device", old, { deviceId: "devA" });
+    core.connect(CID, "device", next, { deviceId: "devA" });
+    expect(old.closedWith).toBe(4003);
+    core.message(CID, host, JSON.stringify({ t: "encrypted", deviceId: "devA", c: "next" }));
+    expect(old.frames()).toEqual([]);
+    expect(next.frames().map((frame) => JSON.parse(frame).c)).toEqual(["next"]);
   });
 });

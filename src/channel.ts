@@ -1,4 +1,5 @@
 import { TokenBucket } from "./ratelimit.js";
+import { RELAY_PROTOCOL_VERSION } from "./protocol.js";
 
 /**
  * 哑中继核心：channel 注册表、按角色路由、离线队列。
@@ -10,6 +11,8 @@ export type Role = "host" | "device";
 /** 最小连接抽象——ws 适配层与测试假连接都实现它。 */
 export interface Conn {
   readonly role: Role;
+  /** device 连接的可选稳定标识：用于定向直发、离线分槽和单活跃连接替换。 */
+  readonly deviceId?: string;
   send(data: string): void;
   close(code?: number, reason?: string): void;
 }
@@ -120,6 +123,15 @@ export class RelayCore {
         conn.close(4002, "channel_full");
         return { ok: false, reason: "channel_full" };
       }
+      if (opts?.deviceId) {
+        // 同一设备只保留一个活跃逻辑连接；新连接明确替换旧连接，避免重复消费和 seq 分叉。
+        for (const existing of ch.devices) {
+          if (existing.deviceId === opts.deviceId) {
+            ch.devices.delete(existing);
+            existing.close(4003, "device_replaced");
+          }
+        }
+      }
       ch.devices.add(conn);
     }
 
@@ -133,7 +145,7 @@ export class RelayCore {
       if (slot) replay.push(...this.drainSlot(ch.toDevices, slot));
       replay.push(...this.drainSlot(ch.toDevices, "*"));
     }
-    conn.send(JSON.stringify({ t: "relay.hello", role, queued: replay.length }));
+    conn.send(JSON.stringify({ t: "relay.hello", role, queued: replay.length, version: RELAY_PROTOCOL_VERSION }));
     for (const f of replay) conn.send(f.data);
     return { ok: true };
   }
@@ -155,11 +167,21 @@ export class RelayCore {
     }
 
     if (conn.role === "host") {
-      if (ch.devices.size === 0) {
-        // 按帧外层 deviceId 分槽入队（零知识不破：deviceId 本就是 relay 可见的路由元数据）
-        this.enqueue(ch.toDevices, slotOf(data), data, conn);
+      const slot = slotOf(data);
+      if (slot === "*") {
+        // 配对期 wildcard：在线设备广播；完全无设备时才进入共享离线槽。
+        if (ch.devices.size === 0) this.enqueue(ch.toDevices, "*", data, conn);
+        else for (const d of ch.devices) d.send(data);
       } else {
-        for (const d of ch.devices) d.send(data);
+        // 定向帧按目标设备独立判断：其他设备在线不代表目标设备已收到，离线必须入队。
+        let delivered = false;
+        for (const d of ch.devices) {
+          if (d.deviceId === slot) {
+            d.send(data);
+            delivered = true;
+          }
+        }
+        if (!delivered) this.enqueue(ch.toDevices, slot, data, conn);
       }
     } else {
       if (!ch.host) this.enqueueArray(ch.toHost, data, conn);
