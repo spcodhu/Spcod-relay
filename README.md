@@ -1,6 +1,6 @@
-# @spcode/relay —— 零知识哑中继
+# @spcod/relay —— 零知识哑中继
 
-Spcode Harness 远程控制功能的中继服务器（dumb relay）。设计见仓库 `docs/remote-control-design.md` 第 4.5 节。
+Spcod 远程控制功能的中继服务器（dumb relay）。总体设计见主仓 [远程控制设计文档](https://github.com/spcodhu/Spcode/blob/master/docs/remote-control-design.md)。
 
 ## 这是什么
 
@@ -17,8 +17,8 @@ relay **看不到**代码、提示词、会话内容、定时任务内容——�
 ### Docker（推荐）
 
 ```bash
-docker build -t spcode-relay apps/relay
-docker run -d -p 8787:8787 --name spcode-relay spcode-relay
+docker build -t spcod-relay .
+docker run -d -p 8787:8787 --name spcod-relay spcod-relay
 ```
 
 托管手机端 PWA（可选）：
@@ -27,10 +27,11 @@ docker run -d -p 8787:8787 --name spcode-relay spcode-relay
 docker run -d -p 8787:8787 -v $(pwd)/public:/app/public:ro spcode-relay
 ```
 
-### 裸机（Node 20+）
+### 裸机（Node 22.19+）
 
 ```bash
-cd apps/relay
+git clone https://github.com/spcodhu/spcod-relay.git
+cd spcod-relay
 pnpm install
 pnpm build
 pnpm start          # 默认监听 :8787

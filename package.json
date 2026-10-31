@@ -1,22 +1,48 @@
 {
-  "name": "@spcode/relay",
+  "name": "@spcod/relay",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Spcode 远程控制零知识哑中继——只路由加密 blob，不见明文",
+  "description": "Spcod 远程控制零知识哑中继——只路由加密 blob，不见明文",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spcodhu/spcod-relay.git"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./channel": {
+      "types": "./dist/channel.d.ts",
+      "import": "./dist/channel.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "pnpm build"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "@types/ws": "^8.5.13",
-    "typescript": "^5.9.2",
-    "vitest": "^5.0.2"
+    "@types/node": "22.20.5",
+    "@types/ws": "8.18.2",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
   }
 }
