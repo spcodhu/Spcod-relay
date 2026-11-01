@@ -1,0 +1,36 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要部署的镜像版本（不含 v）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: ${{ vars.DEPLOY_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy fixed image via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_HOST_DIR }}"
+            export VERSION="${{ github.event.inputs.version || github.event.workflow_run.head_branch.name }}"
+            export RELAY_VERSION="${VERSION#v}"
+            docker compose --env-file relay.env -f docker-compose.yml pull
+            docker compose --env-file relay.env -f docker-compose.yml up -d
+            sleep 8
+            curl --fail --retry 5 --retry-delay 3 "${{ secrets.DEPLOY_HEALTH_URL }}"

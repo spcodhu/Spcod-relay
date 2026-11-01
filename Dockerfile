@@ -1,19 +1,16 @@
 # syntax=docker/dockerfile:1
-# Spcode Relay —— 零知识哑中继（单文件多阶段构建）
-# 构建：docker build -t spcode-relay apps/relay（或以 apps/relay 为上下文）
-# 运行：docker run -p 8787:8787 spcode-relay
-
-FROM node:20-alpine AS deps
+# 独立构建：docker build -t spcod-relay .
+FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+COPY package.json pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY tsconfig.json ./
 COPY src ./src
-RUN npx tsc -p tsconfig.json && npm prune --omit=dev
+RUN pnpm build && pnpm prune --prod
 
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=8787 \
     STATIC_DIR=/app/public
@@ -21,7 +18,8 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-# 可选：挂载 PWA 构建产物 → -v $(pwd)/public:/app/public:ro
 USER node
 EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
+  CMD wget -qO- http://127.0.0.1:8787/health || exit 1
 CMD ["node", "dist/index.js"]
