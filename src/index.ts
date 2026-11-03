@@ -125,6 +125,48 @@ function json(res: http.ServerResponse, status: number, value: unknown, headers:
   res.end(JSON.stringify(value));
 }
 
+const HEALTH_TEXT = {
+  "zh-CN": {
+    title: "Spcod Relay 健康检查",
+    status: "服务运行正常",
+    version: "协议版本",
+    checkedAt: "检查时间（UTC）",
+    privacy: "此公开页面仅显示服务状态，不包含连接、密钥或消息数据。",
+  },
+  en: {
+    title: "Spcod Relay health check",
+    status: "Service is operational",
+    version: "Protocol version",
+    checkedAt: "Checked at (UTC)",
+    privacy: "This public page only reports service status. It contains no connection, credential, or message data.",
+  },
+};
+
+export function healthPage(acceptLanguage = ""): string {
+  const preferred = acceptLanguage
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .find((value) => /^(?:zh|en)(?:[-;]|$)/.test(value));
+  const locale = preferred?.startsWith("en") ? "en" : "zh-CN";
+  const text = HEALTH_TEXT[locale];
+  const checkedAt = new Date().toISOString();
+  return `<!doctype html><html lang="${locale}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${text.title}</title>
+<style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:38rem;margin:12vh auto;padding:0 1.25rem;line-height:1.6}.status{display:flex;align-items:center;gap:.65rem;font-size:1.35rem;font-weight:650}.dot{width:.8rem;height:.8rem;border-radius:50%;background:#22c55e;box-shadow:0 0 0 .3rem #22c55e26}dl{display:grid;grid-template-columns:auto 1fr;gap:.5rem 1.5rem;padding:1.25rem 0;border-block:1px solid #8884}dt{color:#888}dd{margin:0;font-variant-numeric:tabular-nums}.privacy{color:#888;font-size:.9rem}</style></head>
+<body><h1>Spcod Relay</h1><p class="status"><span class="dot" aria-hidden="true"></span>${text.status}</p>
+<dl><dt>${text.version}</dt><dd>${RELAY_PROTOCOL_VERSION}</dd><dt>${text.checkedAt}</dt><dd>${checkedAt}</dd></dl>
+<p class="privacy">${text.privacy}</p></body></html>`;
+}
+
+function html(res: http.ServerResponse, status: number, body: string): void {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    ...SECURITY_HEADERS,
+  });
+  res.end(body);
+}
+
 function originAllowed(origin: string | undefined, host: string | undefined, allowed: string[]): boolean {
   if (!origin) return true;
   try {
@@ -215,7 +257,11 @@ export function createRelayServer(config: RelayConfig): RelayServer {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       if (url.pathname === "/health") {
-        json(res, 200, { ok: true, version: RELAY_PROTOCOL_VERSION });
+        const acceptsHtml = (req.headers.accept ?? "")
+          .split(",")
+          .some((value) => value.trim().toLowerCase().startsWith("text/html"));
+        if (acceptsHtml) html(res, 200, healthPage(req.headers["accept-language"]));
+        else json(res, 200, { ok: true, version: RELAY_PROTOCOL_VERSION });
         return;
       }
       if (url.pathname === RELAY_TICKET_PATH && req.method === "OPTIONS") {

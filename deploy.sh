@@ -11,11 +11,12 @@ usage() {
   cat <<'EOF'
 Usage:
   ./deploy.sh                         Deploy relay with HTTP/WebSocket on port 8787
+  ./deploy.sh --check                 Check Git, Docker, Compose, and daemon access
   ./deploy.sh --domain relay.example.com
                                       Deploy relay and Caddy with automatic HTTPS
   ./deploy.sh --no-tls                Disable Caddy and expose relay directly
 
-Requires Docker 24+ with the Docker Compose v2 plugin.
+Requires Git, Docker 24+, and the Docker Compose v2 plugin.
 Configuration and the generated access key are stored in deploy/relay.env.
 EOF
 }
@@ -31,8 +32,13 @@ die() {
 
 mode="auto"
 domain_override=""
+check_only=false
 while (($# > 0)); do
   case "$1" in
+    --check)
+      check_only=true
+      shift
+      ;;
     --domain)
       (($# >= 2)) || die "--domain requires a DNS name."
       mode="domain"
@@ -58,9 +64,19 @@ while (($# > 0)); do
   esac
 done
 
+command -v git >/dev/null 2>&1 || die "Git is required. Install Git first."
 command -v docker >/dev/null 2>&1 || die "Docker is required. Install Docker 24+ and the Compose v2 plugin first."
-docker info >/dev/null 2>&1 || die "Docker is not running or the current user cannot access it. Start Docker or check your permissions."
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (the 'docker compose' command)."
+docker info >/dev/null 2>&1 || die "Docker is not running or the current user cannot access it. Start Docker or check your permissions."
+
+if [[ "${check_only}" == true ]]; then
+  log "$(git --version)"
+  log "$(docker --version)"
+  log "$(docker compose version)"
+  log "Docker daemon is running and accessible."
+  log "All deployment dependencies are available."
+  exit 0
+fi
 
 [[ -f "${DEPLOY_DIR}/relay.env.example" ]] || die "Missing deploy/relay.env.example."
 if [[ ! -f "${ENV_FILE}" ]]; then

@@ -77,10 +77,27 @@ describe("HTTP 服务", () => {
     await rm(staticDir, { recursive: true, force: true });
   });
 
-  it("GET /health 返回 ok 与活跃 channel 数", async () => {
+  it("GET /health 为命令行与自动化返回 JSON", async () => {
     const res = await fetch(`http://${base}/health`);
     expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
     expect(await res.json()).toEqual({ ok: true, version: 2 });
+  });
+
+  it("GET /health 为浏览器返回中英文健康页面", async () => {
+    const english = await fetch(`http://${base}/health`, {
+      headers: { accept: "text/html,application/xhtml+xml", "accept-language": "en-US,en;q=0.9" },
+    });
+    expect(english.status).toBe(200);
+    expect(english.headers.get("content-type")).toContain("text/html");
+    expect(english.headers.get("cache-control")).toBe("no-store");
+    const englishPage = await english.text();
+    expect(englishPage).toContain("Service is operational");
+    expect(englishPage).toContain("Protocol version");
+    expect(englishPage).not.toMatch(/[\u4e00-\u9fff]/);
+
+    const chinese = await fetch(`http://${base}/health`, { headers: { accept: "text/html" } });
+    expect(await chinese.text()).toContain("服务运行正常");
   });
 
   it("静态资源按 MIME 服务", async () => {

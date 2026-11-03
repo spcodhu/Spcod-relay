@@ -14,38 +14,84 @@
 | 无域名部署 | 放行 TCP 8787，或仅在内网开放 |
 | 域名部署 | 域名 A/AAAA 记录指向服务器，放行 TCP 80、443；UDP 443 可选，用于 HTTP/3 |
 
-验证 Docker：
+### 检查依赖
 
 ```bash
-docker version
+git --version
+docker --version
 docker compose version
+docker info
 ```
 
-如果当前用户无法访问 Docker，请先启动 Docker 并配置好用户权限。部署脚本不会自动修改系统软件或防火墙。
+`docker info` 不仅能确认命令存在，还能检查 Docker 守护进程是否运行、当前用户是否有访问权限。
+
+### Ubuntu 安装依赖
+
+Ubuntu 22.04/24.04 可使用 Docker 官方 apt 仓库：
+
+```bash
+sudo apt update
+sudo apt install -y git ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+```
+
+验证安装：
+
+```bash
+sudo docker run --rm hello-world
+```
+
+如需让当前普通用户不使用 `sudo` 运行 Docker：
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+然后注销并重新登录，再运行 `docker info`。其他发行版使用 [Docker 官方安装指南](https://docs.docker.com/engine/install/)。部署脚本不会自动修改系统软件或防火墙。注意云安全组和宿主机防火墙都要检查；Docker 发布端口可能绕过部分 UFW 规则，详见 [Docker 与 UFW 说明](https://docs.docker.com/engine/network/packet-filtering-firewalls/)。
 
 ## 2. 一条命令完成初始部署
 
 ```bash
 git clone https://github.com/spcodhu/Spcod-relay.git
 cd Spcod-relay
+./deploy.sh --check   # 可选：确认 Git、Docker、Compose 和守护进程权限
 ./deploy.sh
 ```
 
 脚本会依次：
 
-1. 检查 Docker 与 Compose；
+1. 检查 Git、Docker 与 Compose；
 2. 首次运行时创建 `deploy/relay.env`，权限设为仅当前用户可读写；
 3. 自动生成 32 字节随机 `RELAY_ACCESS_KEY`；
 4. 从当前源码构建 `spcod-relay:local` 镜像；
 5. 启动 relay 并等待 `/health` 健康检查通过；
 6. 输出 harness 所需的 Relay 地址和访问密钥。
 
-健康检查也可以手工执行：
+部署后可以手工验证：
 
 ```bash
-curl http://127.0.0.1:8787/health
+# JSON 健康检查，适合命令行和监控
+curl --fail http://127.0.0.1:8787/health
 # {"ok":true,"version":2}
+
+# 检查容器状态
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml ps
 ```
+
+也可以从其他机器的浏览器打开 `http://<服务器IP>:8787/health`。浏览器会看到中英文自适应的健康页面，显示运行状态、协议版本和 UTC 检查时间；该页面是公开的，但不包含访问密钥、连接信息或消息内容。命令行 `curl` 仍获得 JSON，因为 `/health` 会根据 `Accept` 请求头自动选择响应格式。
 
 ## 3. 配置 Spcod harness
 

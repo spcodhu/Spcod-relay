@@ -4,13 +4,46 @@
 
 Spcod harness 远程控制功能的自托管中继服务器。它只在手机与电脑之间路由端到端加密的数据，不解析代码、提示词、会话或定时任务内容。
 
-## 一键部署
+## 检查与安装依赖
 
-在已安装 **Docker 24+ 和 Docker Compose v2 插件**的远端 Linux 服务器上执行：
+部署只需要 Bash、Git、Docker Engine 24+ 和 Docker Compose 2.20+ 插件。先检查：
+
+```bash
+git --version
+docker --version
+docker compose version
+docker info
+```
+
+Ubuntu 22.04/24.04 可使用 Docker 官方 apt 仓库安装全部依赖：
+
+```bash
+sudo apt update
+sudo apt install -y git ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+```
+
+安装后可运行 `sudo docker run --rm hello-world` 验证 Docker。如果希望当前普通用户直接运行 Docker，可执行 `sudo usermod -aG docker "$USER"`，然后注销并重新登录。其他发行版请使用 [Docker 官方安装指南](https://docs.docker.com/engine/install/)。
+
+## 一键部署
 
 ```bash
 git clone https://github.com/spcodhu/Spcod-relay.git
 cd Spcod-relay
+./deploy.sh --check   # 可选：显示依赖版本并检查 Docker 守护进程
 ./deploy.sh
 ```
 
@@ -22,6 +55,14 @@ cd Spcod-relay
 - 访问密钥：终端输出的 `Access key`
 
 配置与密钥保存在 `deploy/relay.env`，该文件已被 Git 忽略。直接暴露的 HTTP/WebSocket 适合临时或内网使用；长期公网部署建议按下一步启用域名和 HTTPS。
+
+## 验证安装与部署
+
+- **浏览器健康页**：打开 `http://<服务器IP>:8787/health`；配置域名后打开 `https://relay.example.com/health`。页面会根据浏览器语言显示中文或英文，只包含运行状态、协议版本和检查时间，不包含密钥或消息数据。
+- **命令行与自动化**：运行 `curl --fail http://<服务器IP>:8787/health`，配置域名后替换为 `https://relay.example.com/health`。成功时返回 `{"ok":true,"version":2}`。
+- **容器状态**：运行 `docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls ps`，确认 relay 为 `healthy`；启用域名后 Caddy 应为 `running`。
+
+`/health` 会按请求头的 `Accept` 自动区分浏览器 HTML 与 JSON，无需维护两个检查地址。
 
 ## 后续配置域名与自动证书
 

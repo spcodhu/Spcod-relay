@@ -4,13 +4,46 @@
 
 A self-hosted relay for Spcod harness remote control. It routes end-to-end encrypted data between phones and computers without reading code, prompts, conversations, or scheduled-task content.
 
-## One-command deployment
+## Check and install dependencies
 
-On a remote Linux server with **Docker 24+ and the Docker Compose v2 plugin**, run:
+Deployment only requires Bash, Git, Docker Engine 24+, and the Docker Compose 2.20+ plugin. Check them first:
+
+```bash
+git --version
+docker --version
+docker compose version
+docker info
+```
+
+On Ubuntu 22.04/24.04, install all dependencies from Docker's official apt repository:
+
+```bash
+sudo apt update
+sudo apt install -y git ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+```
+
+Run `sudo docker run --rm hello-world` to verify the installation. To let a regular user run Docker directly, run `sudo usermod -aG docker "$USER"`, then log out and back in. For other distributions, use the [official Docker installation guide](https://docs.docker.com/engine/install/).
+
+## One-command deployment
 
 ```bash
 git clone https://github.com/spcodhu/Spcod-relay.git
 cd Spcod-relay
+./deploy.sh --check   # Optional: show versions and check Docker daemon access
 ./deploy.sh
 ```
 
@@ -22,6 +55,14 @@ When deployment finishes, the terminal prints the relay URL and access key. In *
 - Access key: the printed `Access key`
 
 Configuration and credentials are stored in `deploy/relay.env`, which is ignored by Git. Direct HTTP/WebSocket is intended for temporary or private-network use; enable a domain and HTTPS for a long-lived public deployment.
+
+## Verify installation and deployment
+
+- **Browser health page**: open `http://<SERVER_IP>:8787/health`, or `https://relay.example.com/health` after configuring a domain. It follows the browser's Chinese or English language preference and only shows service status, protocol version, and check time—never credentials or message data.
+- **Command line and automation**: run `curl --fail http://<SERVER_IP>:8787/health`, replacing the URL with `https://relay.example.com/health` after configuring a domain. A healthy service returns `{"ok":true,"version":2}`.
+- **Container status**: run `docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls ps`. The relay should be `healthy`; Caddy should be `running` when a domain is enabled.
+
+`/health` uses the `Accept` request header to serve HTML to browsers and JSON to automation, so both use the same endpoint.
 
 ## Add a domain and automatic TLS later
 

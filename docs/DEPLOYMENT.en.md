@@ -14,38 +14,84 @@ This guide starts with a fresh remote Linux server. Deployment does not require 
 | Deployment without a domain | Allow TCP 8787, or expose it only on a private network |
 | Deployment with a domain | Point A/AAAA records at the server and allow TCP 80 and 443; UDP 443 is optional for HTTP/3 |
 
-Verify Docker:
+### Check dependencies
 
 ```bash
-docker version
+git --version
+docker --version
 docker compose version
+docker info
 ```
 
-If the current user cannot access Docker, start Docker and configure user permissions first. The deployment script does not modify system packages or firewall rules.
+Besides confirming that the commands exist, `docker info` checks that the Docker daemon is running and accessible to the current user.
+
+### Install dependencies on Ubuntu
+
+On Ubuntu 22.04/24.04, use Docker's official apt repository:
+
+```bash
+sudo apt update
+sudo apt install -y git ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+```
+
+Verify the installation:
+
+```bash
+sudo docker run --rm hello-world
+```
+
+To let the current regular user run Docker without `sudo`:
+
+```bash
+sudo usermod -aG docker "$USER"
+```
+
+Then log out and back in before running `docker info`. For other distributions, use the [official Docker installation guide](https://docs.docker.com/engine/install/). The deployment script does not modify system packages or firewall rules. Check both the cloud security group and host firewall; published Docker ports can bypass some UFW rules, as explained in [Docker's UFW documentation](https://docs.docker.com/engine/network/packet-filtering-firewalls/).
 
 ## 2. Deploy with one command
 
 ```bash
 git clone https://github.com/spcodhu/Spcod-relay.git
 cd Spcod-relay
+./deploy.sh --check   # Optional: check Git, Docker, Compose, and daemon access
 ./deploy.sh
 ```
 
 The script will:
 
-1. Check Docker and Compose;
+1. Check Git, Docker, and Compose;
 2. Create `deploy/relay.env` on the first run, readable and writable only by the current user;
 3. Generate a random 32-byte `RELAY_ACCESS_KEY`;
 4. Build the `spcod-relay:local` image from the checked-out source;
 5. Start the relay and wait for its `/health` check to pass;
 6. Print the relay URL and access key required by harness.
 
-You can also run the health check manually:
+After deployment, verify it manually:
 
 ```bash
-curl http://127.0.0.1:8787/health
+# JSON health check for command-line use and monitoring
+curl --fail http://127.0.0.1:8787/health
 # {"ok":true,"version":2}
+
+# Check container status
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml ps
 ```
+
+You can also open `http://<SERVER_IP>:8787/health` in a browser on another machine. The public health page follows the browser's Chinese or English language preference and shows service status, protocol version, and UTC check time. It contains no access key, connection information, or message content. Command-line `curl` still receives JSON because `/health` selects its response format from the `Accept` request header.
 
 ## 3. Configure Spcod harness
 
