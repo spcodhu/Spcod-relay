@@ -1,82 +1,68 @@
-# 自托管指南
+# 自托管与运行配置
 
-## 1. 准备
+快速部署请优先阅读[一键部署教程](DEPLOYMENT.md)（[English](DEPLOYMENT.en.md)）。本文说明可调整的运行参数和进阶场景。
 
-- 一台 Ubuntu VPS，开放 80/443。
-- 一个指向 VPS 的域名。
-- Docker 与 Docker Compose。
-- 生成访问密钥：
+## 部署架构
 
-```bash
-openssl rand -base64 32
+`./deploy.sh` 使用 `deploy/docker-compose.yml`：
+
+- `relay`：从当前源码构建，容器内监听 8787；无域名时默认暴露 `0.0.0.0:8787`，启用域名后仅绑定 `127.0.0.1:8787`。
+- `caddy`：仅在启用 `tls` profile 时运行，占用 80/443，自动处理证书和 WebSocket 反代。
+- `relay.env`：保存域名、访问密钥和限额，权限为 0600，已被 Git 忽略。
+- Docker 数据卷：只保存 Caddy 证书与配置；relay 消息队列不持久化。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DOMAIN` | 空 | TLS 域名；建议通过 `./deploy.sh --domain <域名>` 设置 |
+| `RELAY_ACCESS_KEY` | 脚本自动生成 | 自托管访问密钥；公网实例不要留空 |
+| `RELAY_BIND` | `0.0.0.0` | relay 宿主机端口绑定地址；启用 TLS 时脚本改为 `127.0.0.1` |
+| `RELAY_PORT` | `8787` | 无域名模式暴露的宿主机端口 |
+| `ALLOW_LEGACY_WS` | `true` | 无 ticket 旧客户端兼容；配置访问密钥后仍强制 ticket |
+| `CORS_ALLOWED_ORIGINS` | 空 | 外部 PWA origin 白名单，多个完整 origin 用英文逗号分隔 |
+| `STATIC_DIR` | `/app/public` | 容器内 PWA 静态目录；不存在时显示说明页 |
+| `QUEUE_MAX` | `1000` | 每 channel、每方向离线帧上限 |
+| `QUEUE_TTL_HOURS` | `72` | 离线帧存活时长 |
+| `MAX_CHANNELS` | `4096` | 最大 channel 数 |
+| `MAX_DEVICES_PER_CHANNEL` | `16` | 每 channel 最大设备数 |
+| `QUEUE_BYTES_MAX_MB` | `64` | 全局离线队列内存预算 |
+| `HEARTBEAT_MS` | `30000` | WebSocket ping/pong 间隔 |
+| `MAX_BUFFERED_BYTES` | `1048576` | 单连接发送缓冲预算 |
+| `TICKET_RATE_PER_MIN` | `60` | 每 IP 每分钟票据签发上限 |
+| `TRUST_PROXY` | `false` | 仅在可信反向代理后设为 `true`，用于读取转发 IP；TLS 模式自动启用 |
+
+修改 `deploy/relay.env` 后运行 `./deploy.sh` 使配置生效。
+
+## PWA 托管与 origin
+
+relay 可以通过 `STATIC_DIR` 托管手机端 PWA 构建产物。完全自托管 PWA 时，在 Compose 的 relay 服务中把构建产物只读挂载到 `/app/public`，再重新部署。
+
+两种连接方式：
+
+1. **现有官方 PWA + 自托管 relay**：保持 PWA origin 不变，并把该 origin 加入 `CORS_ALLOWED_ORIGINS`。
+2. **PWA 与 relay 同源**：无需额外 CORS 配置。不同 origin 的 IndexedDB 不共享，首次使用需要重新配对；不要导出私钥进行迁移。
+
+## 使用其他反向代理
+
+如果不使用内置 Caddy，可运行 `./deploy.sh` 后直接代理 `127.0.0.1:8787`，或手工把 `RELAY_BIND` 改为 `127.0.0.1`。代理必须：
+
+- 终止 TLS，并将外部 `wss://<域名>` 转发到 relay；
+- 转发 WebSocket 的 `Upgrade` 与 `Connection` 头；
+- 设置可信的 `X-Forwarded-For`，然后将 `TRUST_PROXY=true`；
+- 转发 `/v1/tickets`、`/health` 和 channel WebSocket 路径。
+
+最小 Caddy 配置示例：
+
+```caddyfile
+relay.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
 ```
 
-公网自托管强烈建议配置 `RELAY_ACCESS_KEY`。该密钥只控制 relay 准入，不是手机/电脑的 E2E 私钥。
+## 安全与数据说明
 
-## 2. 启动
-
-```bash
-git clone https://github.com/spcodhu/spcod-relay.git
-cd spcod-relay
-cp deploy/relay.env.example deploy/relay.env
-# 编辑域名、访问密钥和 PWA origin
-docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml up -d
-```
-
-`docker-compose.yml` 默认使用 GHCR 镜像。若要本地构建：
-
-```bash
-docker build -t spcod-relay .
-docker run -d --name spcod-relay \
-  -p 127.0.0.1:8787:8787 \
-  -e RELAY_ACCESS_KEY='替换为强随机密钥' \
-  spcod-relay
-```
-
-## 3. Caddy HTTPS
-
-把 `deploy/Caddyfile` 中的 `${DOMAIN}` 替换为真实域名，然后让 Caddy 加载它。Caddy 自动申请和续期证书，并转发 WebSocket。
-
-验证：
-
-```bash
-curl https://<domain>/health
-# {"ok":true,"version":2}
-```
-
-## 4. 桌面与手机配置
-
-- 桌面：设置 → 远程控制 → 自托管，填 `wss://<domain>` 与访问密钥，测试后保存。
-- 手机：设置 → 连接服务器 → 自托管，填相同地址和密钥。修改只重建连接，不会解除配对。
-- 新配对 QR v3 可携带访问密钥，含密钥的 QR 不要分享。
-
-## 5. PWA 与 origin
-
-relay 可通过 `STATIC_DIR` 托管 PWA。PWA 源码在主仓 `apps/mobile`，构建后为 `apps/mobile/dist`：
-
-```bash
-pnpm --filter @spcode/mobile build
-```
-
-两种用法：
-
-1. **官方 PWA 连接自托管 relay**：页面 origin 不变，现有配对可继续；自托管 relay 的 `CORS_ALLOWED_ORIGINS` 必须包含官方 PWA origin。
-2. **完全自托管 PWA**：把 dist 挂到 `/app/public:ro`。不同 origin 的 IndexedDB 不共享，首次需要重新扫码，绝不导出私钥做迁移。
-
-## 6. 主要环境变量
-
-| 变量 | 说明 |
-|---|---|
-| `RELAY_ACCESS_KEY` | 可选访问密钥；公网自托管建议必填 |
-| `ALLOW_LEGACY_WS` | 无 ticket 旧客户端兼容；有密钥时仍强制 ticket |
-| `CORS_ALLOWED_ORIGINS` | 逗号分隔的 PWA origin 白名单 |
-| `STATIC_DIR` | PWA 静态目录，默认 `/app/public` |
-| `QUEUE_MAX` / `QUEUE_TTL_HOURS` | 每设备/方向队列条数与 TTL |
-| `MAX_CHANNELS` / `MAX_DEVICES_PER_CHANNEL` | channel 与设备配额 |
-| `QUEUE_BYTES_MAX_MB` | 全局离线队列字节预算 |
-| `HEARTBEAT_MS` | ping/pong 间隔，默认 30000 |
-| `MAX_BUFFERED_BYTES` | 单连接发送缓冲预算 |
-| `TICKET_RATE_PER_MIN` | 每 IP 票据签发限流 |
-| `TRUST_PROXY` | 仅可信反代后设为 true，用于 IP 限流 |
-
-离线队列仅在内存中，重启不持久化。请先小范围验证，再导入正式设备。
+- 访问密钥只控制 relay 准入，不是手机或电脑的端到端加密私钥。
+- 长期访问密钥用于换取 30 秒单次 ticket，不应写入 WebSocket URL。
+- relay 不记录消息明文；离线队列只存在内存中，重启后由客户端重连恢复。
+- 定期更新源码并重新部署。更新前可备份 `deploy/relay.env`，不要备份或公开客户端私钥。

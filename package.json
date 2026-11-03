@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Spcod 远程控制零知识哑中继——只路由加密 blob，不见明文",
   "license": "MIT",
+  "packageManager": "pnpm@9.15.9",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/spcodhu/spcod-relay.git"

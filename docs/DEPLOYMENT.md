@@ -1,50 +1,157 @@
-# 官方实例部署与回滚
+# Spcod Relay 一键部署教程
 
-## 初始准备
+[English](DEPLOYMENT.en.md)
 
-1. 新建 `spcodhu/spcod-relay` 仓库，开启 GHCR 包读写与 Actions。
-2. 准备 Ubuntu VPS、Docker、Caddy 和域名 DNS。
-3. 将 `deploy/` 放到 VPS 固定目录，例如 `/opt/spcod-relay`。
-4. 配置 `relay.env`：域名、访问密钥、PWA origin、生产限额。
-5. 在 GitHub secrets 配置：
-   - `DEPLOY_ENABLED=true`（只有明确启用时才部署）
-   - `SSH_HOST`、`SSH_USER`、`SSH_KEY`
-   - `DEPLOY_HOST_DIR=/opt/spcod-relay`
-   - `DEPLOY_HEALTH_URL=https://<domain>/health`
-   - 若发布 npm 包：`NPM_TOKEN`
+本教程面向一台全新的远端 Linux 服务器。整个部署不需要 GitHub Actions、GHCR、Node.js 或 pnpm；镜像直接从当前克隆的源码构建。
 
-## 首次启动
+## 1. 依赖与网络要求
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | 可运行 Docker 的 Linux，x86_64 或 arm64 |
+| 命令行 | Bash、Git |
+| 容器 | Docker Engine 24.0+，Docker Compose 2.20+ 插件 |
+| 无域名部署 | 放行 TCP 8787，或仅在内网开放 |
+| 域名部署 | 域名 A/AAAA 记录指向服务器，放行 TCP 80、443；UDP 443 可选，用于 HTTP/3 |
+
+验证 Docker：
 
 ```bash
-cd /opt/spcod-relay
-docker compose --env-file relay.env -f docker-compose.yml pull
-docker compose --env-file relay.env -f docker-compose.yml up -d
+docker version
+docker compose version
+```
+
+如果当前用户无法访问 Docker，请先启动 Docker 并配置好用户权限。部署脚本不会自动修改系统软件或防火墙。
+
+## 2. 一条命令完成初始部署
+
+```bash
+git clone https://github.com/spcodhu/Spcod-relay.git
+cd Spcod-relay
+./deploy.sh
+```
+
+脚本会依次：
+
+1. 检查 Docker 与 Compose；
+2. 首次运行时创建 `deploy/relay.env`，权限设为仅当前用户可读写；
+3. 自动生成 32 字节随机 `RELAY_ACCESS_KEY`；
+4. 从当前源码构建 `spcod-relay:local` 镜像；
+5. 启动 relay 并等待 `/health` 健康检查通过；
+6. 输出 harness 所需的 Relay 地址和访问密钥。
+
+健康检查也可以手工执行：
+
+```bash
 curl http://127.0.0.1:8787/health
+# {"ok":true,"version":2}
 ```
 
-然后接入 Caddy 并验证 `https://<domain>/health`、PWA 和真实 WSS。
+## 3. 配置 Spcod harness
 
-## 发布
+打开 **Spcod harness → 设置 → 远程控制 → 自托管**，填写：
 
-tag `v*` 触发：测试 → 多架构 GHCR →（可选）npm → 部署。部署仅在 `DEPLOY_ENABLED=true` 时执行，使用固定 tag，不使用浮动 latest。
+| 配置项 | 值 |
+|---|---|
+| Relay 地址 | `ws://<服务器IP>:8787` |
+| 访问密钥 | 部署脚本输出的 `Access key` |
 
-上线顺序：先发布兼容旧客户端的 relay，再发布桌面/手机，最后更新 relay 镜像中锁定的 PWA 版本。
+保存后测试连接。手机端使用同一个 relay 地址和密钥；包含访问密钥的配对二维码不要分享。
 
-## 回滚
+无域名模式使用 HTTP/WebSocket。业务消息始终端到端加密，但长期公网服务仍建议使用下文的 HTTPS/WSS，保护连接元数据与票据交换。
+
+## 4. 后续启用域名与自动 HTTPS
+
+先将 `relay.example.com` 的 A/AAAA 记录指向服务器，确认 DNS 已生效且 TCP 80、443 可从公网访问，然后运行：
 
 ```bash
-cd /opt/spcod-relay
-# 将 relay.env 的 RELAY_VERSION 改为上一稳定 tag
-docker compose --env-file relay.env -f docker-compose.yml pull
-docker compose --env-file relay.env -f docker-compose.yml up -d
-curl --fail https://<domain>/health
+./deploy.sh --domain relay.example.com
 ```
 
-离线队列只在内存中，回滚/重启后让客户端重连，由桌面对账恢复，不把队列当数据库。
+该命令会保留原访问密钥，并自动：
 
-## 监控
+- 将 `DOMAIN` 写入 `deploy/relay.env`；
+- 启动 Caddy 2，申请并续期 Let's Encrypt/ZeroSSL 证书；
+- 将 relay 的宿主机端口绑定到 `127.0.0.1`；
+- 通过 Caddy 转发 HTTP 与 WebSocket；
+- 将证书和 Caddy 配置保存到 Docker 数据卷。
 
-- 容器 healthcheck 与 restart policy；
-- Caddy TLS 与 WSS 连接成功率；
-- relay 错误码、限流、channel/队列/内存配额；
-- 不采集业务帧、访问密钥或 ticket。
+验证：
+
+```bash
+curl --fail https://relay.example.com/health
+# {"ok":true,"version":2}
+```
+
+最后将 harness 的 Relay 地址改为 `wss://relay.example.com`。访问密钥无需改变。
+
+如果证书尚未签发，请检查 DNS、80/443 防火墙和 Caddy 日志：
+
+```bash
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls logs --tail=100 caddy
+```
+
+## 5. 配置与更新
+
+主要配置文件是 `deploy/relay.env`。它包含访问密钥，已被 `.gitignore` 排除，不要提交或公开。
+
+修改配置后，重新运行 `./deploy.sh` 即可重建并重启。脚本会读取已保存的域名，因此更新时不必重复传入 `--domain`：
+
+```bash
+git pull
+./deploy.sh
+```
+
+如需临时关闭 Caddy 并重新直接暴露 8787：
+
+```bash
+./deploy.sh --no-tls
+```
+
+再次启用已保存的域名：
+
+```bash
+./deploy.sh --domain relay.example.com
+```
+
+## 6. 常用运维命令
+
+以下命令均在项目根目录执行。
+
+```bash
+# 查看全部服务状态
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls ps
+
+# 跟踪 relay 日志
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml logs -f relay
+
+# 重启 relay
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml restart relay
+
+# 停止 relay 与 Caddy，但保留配置和证书数据卷
+docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls down
+```
+
+离线消息队列只在内存中。重启或更新后客户端需要重连，不要把 relay 队列当作持久化数据库。
+
+## 7. PWA 与跨域配置
+
+如果手机端 PWA 与 relay 使用同一个域名和端口，无需额外配置 CORS。若使用其他域名下的官方或自托管 PWA，在 `deploy/relay.env` 中设置完整 origin，多个值用英文逗号分隔：
+
+```dotenv
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://another.example.com
+```
+
+然后重新运行 `./deploy.sh`。不要填写路径或通配符。
+
+## 8. 故障排查
+
+- **提示 Docker 不可用**：确认 Docker 已启动，当前用户有权限访问 Docker socket。
+- **提示 Compose 不可用**：安装 Compose v2 插件；命令是 `docker compose`，不是旧版 `docker-compose`。
+- **远程无法连接 8787**：检查云安全组、本机防火墙和 harness 地址是否为 `ws://IP:8787`。
+- **WSS 连接失败**：先检查 `https://域名/health`，再检查 DNS、80/443 和 Caddy 日志。
+- **手机 PWA 返回 `origin_denied`**：把 PWA 的完整 origin 加入 `CORS_ALLOWED_ORIGINS`。
+- **密钥遗失**：在服务器上查看 `deploy/relay.env` 的 `RELAY_ACCESS_KEY`，然后重新填写到客户端。
+- **部署健康检查失败**：运行 Compose 的 `logs --tail=100 relay` 查看日志。
+
+更多运行参数见[自托管指南](SELF_HOSTING.md)。

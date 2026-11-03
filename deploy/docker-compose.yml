@@ -1,10 +1,17 @@
 services:
   relay:
-    image: ghcr.io/spcodhu/spcod-relay:${RELAY_VERSION:-0.1.0}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: spcod-relay:local
     restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       NODE_ENV: production
       PORT: 8787
@@ -20,12 +27,34 @@ services:
       HEARTBEAT_MS: ${HEARTBEAT_MS:-30000}
       MAX_BUFFERED_BYTES: ${MAX_BUFFERED_BYTES:-1048576}
       TICKET_RATE_PER_MIN: ${TICKET_RATE_PER_MIN:-60}
-      TRUST_PROXY: ${TRUST_PROXY:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
     ports:
-      - "127.0.0.1:8787:8787"
+      - "${RELAY_BIND:-0.0.0.0}:${RELAY_PORT:-8787}:8787"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
