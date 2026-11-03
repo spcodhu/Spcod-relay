@@ -77,6 +77,18 @@ The script starts Caddy, which automatically obtains and renews the TLS certific
 
 Then change the relay URL in harness to `wss://relay.example.com`; the access key remains unchanged. See the [deployment guide](docs/DEPLOYMENT.en.md) for details.
 
+### Ports 80/443 are already in use
+
+The defaults remain 80/443 because they are simplest for direct public Caddy certificate issuance. To override the host ports:
+
+```bash
+./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
+```
+
+The values persist in `deploy/relay.env`, so later `./deploy.sh` runs reuse them. With a non-standard HTTPS port, the harness URL and health page become `wss://relay.example.com:8443` and `https://relay.example.com:8443/health`.
+
+These options only change Docker host-port mappings; Caddy still uses 80/443 inside the container. **Public certificate issuance still requires a working ACME validation path.** If Nginx or another service occupies 80/443, configure the existing reverse proxy and certificate forwarding, or free the standard ports—changing ports alone does not guarantee certificate issuance.
+
 ## Dependency versions
 
 | Use case | Dependencies |

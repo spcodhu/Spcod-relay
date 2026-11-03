@@ -77,6 +77,18 @@ cd Spcod-relay
 
 随后把 harness 中的 Relay 地址改为 `wss://relay.example.com`，访问密钥不变。完整教程见[部署指南](docs/DEPLOYMENT.md)。
 
+### 80/443 端口被占用
+
+默认保留 80/443，因为直接使用公网 Caddy 自动证书时最省事。需要自定义宿主机端口时：
+
+```bash
+./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
+```
+
+参数会保存到 `deploy/relay.env`，后续直接运行 `./deploy.sh` 仍沿用该配置。非标准 HTTPS 端口下，harness 地址和健康页分别为 `wss://relay.example.com:8443`、`https://relay.example.com:8443/health`。
+
+自定义端口只改变 Docker 宿主机映射，容器内部仍是 80/443。**公网直接签发证书仍需要有效的 ACME 验证链路**；如果 80/443 已被 Nginx 等服务占用，应配置现有反代和证书转发，或释放标准端口，不能只改端口就假设证书一定可以签发。
+
 ## 依赖版本
 
 | 用途 | 依赖 |

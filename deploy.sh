@@ -14,6 +14,8 @@ Usage:
   ./deploy.sh --check                 Check Git, Docker, Compose, and daemon access
   ./deploy.sh --domain relay.example.com
                                       Deploy relay and Caddy with automatic HTTPS
+  ./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
+                                      Use custom Caddy host ports
   ./deploy.sh --no-tls                Disable Caddy and expose relay directly
 
 Requires Git, Docker 24+, and the Docker Compose v2 plugin.
@@ -32,6 +34,8 @@ die() {
 
 mode="auto"
 domain_override=""
+http_port_override=""
+https_port_override=""
 check_only=false
 while (($# > 0)); do
   case "$1" in
@@ -48,6 +52,24 @@ while (($# > 0)); do
     --domain=*)
       mode="domain"
       domain_override="${1#*=}"
+      shift
+      ;;
+    --http-port)
+      (($# >= 2)) || die "--http-port requires a port number."
+      http_port_override="$2"
+      shift 2
+      ;;
+    --http-port=*)
+      http_port_override="${1#*=}"
+      shift
+      ;;
+    --https-port)
+      (($# >= 2)) || die "--https-port requires a port number."
+      https_port_override="$2"
+      shift 2
+      ;;
+    --https-port=*)
+      https_port_override="${1#*=}"
       shift
       ;;
     --no-tls)
@@ -108,6 +130,13 @@ set_env() {
   chmod 600 "${ENV_FILE}"
 }
 
+validate_port() {
+  local option="$1"
+  local value="$2"
+  [[ "${value}" =~ ^[0-9]+$ ]] || die "${option} must be an integer between 1 and 65535."
+  ((10#${value} >= 1 && 10#${value} <= 65535)) || die "${option} must be between 1 and 65535."
+}
+
 generate_access_key() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -base64 32 | tr -d '\n'
@@ -144,10 +173,18 @@ fi
 
 relay_port="$(get_env RELAY_PORT)"
 relay_port="${relay_port:-8787}"
+caddy_http_port="${http_port_override:-$(get_env CADDY_HTTP_PORT)}"
+caddy_http_port="${caddy_http_port:-80}"
+caddy_https_port="${https_port_override:-$(get_env CADDY_HTTPS_PORT)}"
+caddy_https_port="${caddy_https_port:-443}"
+validate_port --http-port "${caddy_http_port}"
+validate_port --https-port "${caddy_https_port}"
+set_env CADDY_HTTP_PORT "${caddy_http_port}"
+set_env CADDY_HTTPS_PORT "${caddy_https_port}"
 compose=(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}")
 
 if [[ -n "${domain}" ]]; then
-  log "Building relay and starting Caddy with automatic HTTPS for ${domain}..."
+  log "Building relay and starting Caddy for ${domain} (host HTTP ${caddy_http_port}, HTTPS ${caddy_https_port})..."
   "${compose[@]}" --profile tls up -d --build --remove-orphans
 else
   log "Building and starting relay on port ${relay_port}..."
@@ -172,10 +209,12 @@ fi
 if [[ -n "${domain}" ]]; then
   if ! "${compose[@]}" --profile tls ps --status running --services | awk '$0 == "caddy" { found = 1 } END { exit !found }'; then
     "${compose[@]}" --profile tls logs --tail=50 caddy >&2 || true
-    die "Caddy is not running. Check DNS, firewall ports 80/443, and the logs above."
+    die "Caddy is not running. Check DNS, the configured ports, and the logs above."
   fi
-  relay_url="wss://${domain}"
-  health_url="https://${domain}/health"
+  public_address="${domain}"
+  if [[ "${caddy_https_port}" != "443" ]]; then public_address="${domain}:${caddy_https_port}"; fi
+  relay_url="wss://${public_address}"
+  health_url="https://${public_address}/health"
 else
   relay_url="ws://<SERVER_IP>:${relay_port}"
   health_url="http://<SERVER_IP>:${relay_port}/health"
@@ -196,6 +235,8 @@ EOF
 
 if [[ -z "${domain}" ]]; then
   printf 'To enable a domain and automatic HTTPS later, run: ./deploy.sh --domain relay.example.com\n'
+elif [[ "${caddy_http_port}" != "80" || "${caddy_https_port}" != "443" ]]; then
+  printf 'Custom host ports are active. Configure public forwarding and ACME certificate validation for HTTP %s and HTTPS %s.\n' "${caddy_http_port}" "${caddy_https_port}"
 else
   printf 'Caddy will obtain and renew the TLS certificate automatically. DNS and ports 80/443 must be reachable.\n'
 fi

@@ -19,6 +19,8 @@
 | `RELAY_ACCESS_KEY` | 脚本自动生成 | 自托管访问密钥；公网实例不要留空 |
 | `RELAY_BIND` | `0.0.0.0` | relay 宿主机端口绑定地址；启用 TLS 时脚本改为 `127.0.0.1` |
 | `RELAY_PORT` | `8787` | 无域名模式暴露的宿主机端口 |
+| `CADDY_HTTP_PORT` | `80` | Caddy HTTP 宿主机端口，可用 `--http-port` 设置 |
+| `CADDY_HTTPS_PORT` | `443` | Caddy HTTPS/HTTP/3 宿主机端口，可用 `--https-port` 设置 |
 | `ALLOW_LEGACY_WS` | `true` | 无 ticket 旧客户端兼容；配置访问密钥后仍强制 ticket |
 | `CORS_ALLOWED_ORIGINS` | 空 | 外部 PWA origin 白名单，多个完整 origin 用英文逗号分隔 |
 | `STATIC_DIR` | `/app/public` | 容器内 PWA 静态目录；不存在时显示说明页 |

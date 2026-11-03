@@ -137,6 +137,32 @@ If a certificate is not issued, inspect DNS, firewall ports 80/443, and the Cadd
 docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls logs --tail=100 caddy
 ```
 
+### Ports 80/443 are already in use
+
+Identify the processes using the ports:
+
+```bash
+sudo ss -ltnp '( sport = :80 )'
+sudo ss -ltnp '( sport = :443 )'
+```
+
+To make Caddy use different **host ports**, run:
+
+```bash
+./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
+```
+
+You can override just one port, such as `--http-port 8080`. Ports must be between 1 and 65535. Values persist as `CADDY_HTTP_PORT` and `CADDY_HTTPS_PORT` in `deploy/relay.env`, so later updates do not need the arguments again. Compose maps these host ports to Caddy's internal ports 80/443.
+
+When HTTPS uses a port other than 443, include it in both the health-check and harness URLs:
+
+```text
+https://relay.example.com:8443/health
+wss://relay.example.com:8443
+```
+
+**Certificate caveat**: custom ports are intended for an upstream reverse proxy, port forwarding, or private networks. Public ACME certificate validation still has fixed external connectivity requirements that cannot be bypassed merely by changing Docker ports. If another web service occupies 80/443, configure it to forward ACME validation and WebSocket traffic, or free the standard ports and use the defaults.
+
 ## 5. Configuration and updates
 
 The main configuration file is `deploy/relay.env`. It contains the access key, is excluded by `.gitignore`, and must not be committed or published.

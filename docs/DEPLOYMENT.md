@@ -137,6 +137,32 @@ curl --fail https://relay.example.com/health
 docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls logs --tail=100 caddy
 ```
 
+### 80/443 端口被占用
+
+先检查是哪个进程占用端口：
+
+```bash
+sudo ss -ltnp '( sport = :80 )'
+sudo ss -ltnp '( sport = :443 )'
+```
+
+如果需要让 Caddy 使用其他**宿主机端口**，运行：
+
+```bash
+./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
+```
+
+也支持只覆盖一个端口，例如 `--http-port 8080`。端口必须在 1～65535 之间，设置会写入 `deploy/relay.env` 的 `CADDY_HTTP_PORT` 和 `CADDY_HTTPS_PORT`，后续更新无需重复传入。Compose 会把宿主机端口映射到 Caddy 容器内部的 80/443。
+
+HTTPS 使用非 443 端口时，验证地址和 harness 地址都要带端口：
+
+```text
+https://relay.example.com:8443/health
+wss://relay.example.com:8443
+```
+
+**证书注意事项**：自定义端口适合已有外层反向代理、端口映射或私有网络的场景。公网 ACME 证书验证仍有固定的外部连接要求，不能仅靠修改 Docker 端口绕过。如果 80/443 已被其他 Web 服务占用，推荐配置现有服务转发 ACME 验证和 WebSocket，或释放标准端口后使用默认配置。
+
 ## 5. 配置与更新
 
 主要配置文件是 `deploy/relay.env`。它包含访问密钥，已被 `.gitignore` 排除，不要提交或公开。
