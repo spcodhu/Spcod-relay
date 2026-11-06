@@ -101,6 +101,21 @@ These options only change Docker host-port mappings; Caddy still uses 80/443 ins
 
 The Docker image uses Node.js 22 Alpine and pins pnpm 9.15.9 during the build. The deployment script checks that Docker and Compose are available.
 
+## Build cache and mirror acceleration
+
+The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. Later builds reuse separate base-image, source, corepack, and pnpm-store layers/caches; upgrading the PWA does not download npm packages that are already present.
+
+If Docker Hub or npm is slow from the server, override these values in `deploy/relay.env`:
+
+```dotenv
+NODE_IMAGE=<your-cloud-mirror>/library/node:22-alpine
+NPM_REGISTRY=https://registry.npmmirror.com
+```
+
+Then run `./deploy.sh` again. `NODE_IMAGE` can also reference a Node 22 Alpine image already built or imported on the server. Obtain the Docker Hub accelerator URL from your own cloud provider console; configuring Docker daemon `registry-mirrors` also accelerates base-image downloads.
+
+After the first successful build, do not run `docker system prune`, `docker builder prune`, or a `--no-cache` rebuild merely to “clean up”; those commands remove the BuildKit pnpm/corepack caches. Normal `git pull && ./deploy.sh` runs reuse them.
+
 ## Local development
 
 ```bash

@@ -1,31 +1,60 @@
 # syntax=docker/dockerfile:1
 # 独立构建：docker build -t spcod-relay .
 # 最终镜像同时包含 relay 与手机 PWA；PWA 源码固定到 Spcod 的明确提交，保证可复现。
-FROM node:22-alpine AS pwa
-ARG SPCOD_PWA_REPOSITORY=https://github.com/spcodhu/Spcode.git
-ARG SPCOD_PWA_REF=1e8f4a9653edde0ae5e87585bd049b10b2f290a5
-RUN apk add --no-cache ca-certificates git
-RUN git init /pwa \
-  && git -C /pwa remote add origin "${SPCOD_PWA_REPOSITORY}" \
-  && git -C /pwa fetch --depth 1 origin "${SPCOD_PWA_REF}" \
-  && git -C /pwa checkout --detach FETCH_HEAD
-WORKDIR /pwa
-RUN corepack enable \
-  && corepack prepare pnpm@9.15.9 --activate \
-  && pnpm install --frozen-lockfile --filter @spcode/mobile... \
-  && pnpm --filter @spcode/mobile build
+ARG NODE_IMAGE=node:22-alpine
+ARG NPM_REGISTRY=https://registry.npmjs.org
 
-FROM node:22-alpine AS deps
+FROM ${NODE_IMAGE} AS pwa
+ARG SPCOD_PWA_REPOSITORY=https://github.com/spcodhu/Spcode
+ARG SPCOD_PWA_REF=1e8f4a9653edde0ae5e87585bd049b10b2f290a5
+ARG NPM_REGISTRY
+WORKDIR /pwa
+# 使用 Node 自带的 HTTPS 下载，避免额外安装 git/ca-certificates；超时后自动重试。
+RUN node --input-type=module -e '\
+import fs from "node:fs";\
+const [url, output] = process.argv.slice(1);\
+let lastError;\
+for (let attempt = 1; attempt <= 4; attempt++) {\
+  try {\
+    const response = await fetch(url, { signal: AbortSignal.timeout(60000) });\
+    if (!response.ok) throw new Error(`PWA source download failed: HTTP ${response.status}`);\
+    fs.writeFileSync(output, Buffer.from(await response.arrayBuffer()));\
+    lastError = null;\
+    break;\
+  } catch (error) {\
+    lastError = error;\
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, attempt * 2000));\
+  }\
+}\
+if (lastError) throw lastError;\
+' "${SPCOD_PWA_REPOSITORY}/archive/${SPCOD_PWA_REF}.tar.gz" /tmp/spcod-pwa.tar.gz \
+  && mkdir -p /pwa \
+  && tar -xzf /tmp/spcod-pwa.tar.gz --strip-components=1 -C /pwa
+RUN --mount=type=cache,id=spcod-corepack,target=/root/.cache/node/corepack \
+    --mount=type=cache,id=spcod-pnpm-store,target=/root/.local/share/pnpm/store \
+    export npm_config_registry="${NPM_REGISTRY}"; \
+    corepack enable \
+  && corepack prepare pnpm@9.15.9 --activate \
+  && pnpm install --frozen-lockfile --filter @spcode/mobile...
+RUN pnpm --filter @spcode/mobile build
+
+FROM ${NODE_IMAGE} AS deps
+ARG NPM_REGISTRY
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=spcod-corepack,target=/root/.cache/node/corepack \
+    --mount=type=cache,id=spcod-pnpm-store,target=/root/.local/share/pnpm/store \
+    export npm_config_registry="${NPM_REGISTRY}"; \
+    corepack enable \
+  && corepack prepare pnpm@9.15.9 --activate \
+  && pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY tsconfig.json ./
 COPY src ./src
 RUN pnpm build && pnpm prune --prod
 
-FROM node:22-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production \
     PORT=8787 \
     STATIC_DIR=/app/public

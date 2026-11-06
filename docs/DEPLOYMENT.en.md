@@ -165,6 +165,29 @@ wss://relay.example.com:8443
 
 ## 5. Configuration and updates
 
+### Build cache and acceleration
+
+The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. The Dockerfile separates the base image, source, pnpm, and corepack caches. Later builds reuse existing image layers, while the pnpm store persists across builds through BuildKit cache mounts.
+
+If Docker Hub or npm is slow, add these values to `deploy/relay.env`:
+
+```dotenv
+NODE_IMAGE=<your-cloud-mirror>/library/node:22-alpine
+NPM_REGISTRY=https://registry.npmmirror.com
+```
+
+Then run `./deploy.sh`. For Docker Hub, use the accelerator URL assigned by your cloud provider and merge it into `/etc/docker/daemon.json`:
+
+```json
+{
+  "registry-mirrors": ["https://<your-dedicated-accelerator>"]
+}
+```
+
+Then run `sudo systemctl daemon-reload && sudo systemctl restart docker`. If the file already contains other settings, merge the JSON instead of replacing it.
+
+Preserve the build cache: normal `git pull && ./deploy.sh` runs reuse it, while `docker system prune`, `docker builder prune`, and `docker compose build --no-cache` remove it and force fresh downloads. Use `--no-cache` only when diagnosing a broken build.
+
 The main configuration file is `deploy/relay.env`. It contains the access key, is excluded by `.gitignore`, and must not be committed or published.
 
 After changing configuration, rerun `./deploy.sh` to rebuild and restart. The script reads the saved domain, so updates do not need `--domain` again:

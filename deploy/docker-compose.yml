@@ -3,6 +3,9 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     image: spcod-relay:local
     restart: unless-stopped
     read_only: true

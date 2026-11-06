@@ -101,6 +101,21 @@ cd Spcod-relay
 
 Docker 镜像使用 Node.js 22 Alpine，并在构建阶段锁定 pnpm 9.15.9。部署脚本会检查 Docker 与 Compose 是否可用。
 
+## 构建缓存与镜像加速
+
+新 Dockerfile 在首次构建时会下载 Node 基础镜像、固定版本的 Spcod 源码和手机端依赖。之后会分别复用基础镜像层、源码层、corepack 与 pnpm store 缓存；更新 PWA 版本时不会重新下载已经存在的 npm 包。
+
+如果服务器访问 Docker Hub 或 npm 较慢，可在 `deploy/relay.env` 中覆盖：
+
+```dotenv
+NODE_IMAGE=<云厂商镜像加速地址>/library/node:22-alpine
+NPM_REGISTRY=https://registry.npmmirror.com
+```
+
+然后重新运行 `./deploy.sh`。`NODE_IMAGE` 也可以直接使用服务器上已经构建或导入的 Node 22 Alpine 镜像。Docker Hub 的加速地址请使用自己云厂商控制台提供的专属镜像加速器；配置 Docker daemon 的 `registry-mirrors` 后，基础镜像下载也会走同一通道。
+
+首次构建后不要为了“清理”执行 `docker system prune`、`docker builder prune` 或带 `--no-cache` 的重建，否则 BuildKit 的 pnpm/corepack 缓存会被删除。正常执行 `git pull && ./deploy.sh` 会优先复用缓存。
+
 ## 本地开发
 
 ```bash

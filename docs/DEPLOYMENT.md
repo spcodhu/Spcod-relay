@@ -165,6 +165,29 @@ wss://relay.example.com:8443
 
 ## 5. 配置与更新
 
+### 构建缓存与加速
+
+首次构建会下载 Node 基础镜像、固定提交的 Spcod 源码和手机端依赖。Dockerfile 已将基础镜像、源码、pnpm 与 corepack 分成独立缓存层；后续更新会复用已有镜像层，pnpm store 通过 BuildKit cache mount 跨构建保留。
+
+如果 Docker Hub 或 npm 较慢，可在 `deploy/relay.env` 中增加：
+
+```dotenv
+NODE_IMAGE=<云厂商镜像地址>/library/node:22-alpine
+NPM_REGISTRY=https://registry.npmmirror.com
+```
+
+再执行 `./deploy.sh`。Docker Hub 加速建议使用云厂商控制台分配的专属地址，并合并写入 `/etc/docker/daemon.json`：
+
+```json
+{
+  "registry-mirrors": ["https://<你的专属加速地址>"]
+}
+```
+
+修改后执行 `sudo systemctl daemon-reload && sudo systemctl restart docker`。如果文件已有其他配置，请合并 JSON，不要直接覆盖。
+
+保留构建缓存很重要：正常执行 `git pull && ./deploy.sh` 会复用缓存；`docker system prune`、`docker builder prune`、`docker compose build --no-cache` 会删除缓存并导致重新下载。只有缓存损坏或排查构建问题时才使用 `--no-cache`。
+
 主要配置文件是 `deploy/relay.env`。它包含访问密钥，已被 `.gitignore` 排除，不要提交或公开。
 
 修改配置后，重新运行 `./deploy.sh` 即可重建并重启。脚本会读取已保存的域名，因此更新时不必重复传入 `--domain`：
