@@ -75,10 +75,22 @@ cd Spcod-relay
 
 1. 检查 Git、Docker 与 Compose；
 2. 首次运行时创建 `deploy/relay.env`，权限设为仅当前用户可读写；
-3. 自动生成 32 字节随机 `RELAY_ACCESS_KEY`；
+3. 默认进入自托管访问密钥模式，自动生成 32 字节随机 `RELAY_ACCESS_KEY`；
 4. 构建包含 relay 与手机 PWA 的 `spcod-relay:local` 镜像；PWA 从固定提交的 Spcod 源码在 Docker 内构建，无需上传文件；
 5. 启动 relay 并等待 `/health` 健康检查通过；
 6. 输出 harness 所需的 Relay 地址和访问密钥。
+
+### 官方公共实例：显式匿名模式
+
+只有官方公共中继维护者使用匿名模式；普通自托管部署不要开启。官方客户端不携带访问密钥，因此官方实例应执行：
+
+```bash
+./deploy.sh --domain spcod-relay.hlt.cab --anonymous
+```
+
+该参数会把 `RELAY_ALLOW_ANONYMOUS=true` 持久写入 `deploy/relay.env`，后续 `git pull && ./deploy.sh` 仍保持匿名，不会重新生成并强制使用旧密钥。匿名模式不需要、也不会输出访问密钥；恢复自托管准入保护时运行 `./deploy.sh --access-key`。
+
+匿名只关闭 relay 的接入密钥要求，不改变 channel 校验、origin 限制、限流或手机与桌面之间的端到端加密。relay 启动日志会显示 `auth=anonymous` 或 `auth=access-key`；WebSocket 握手拒绝日志只记录状态、原因、role 和 channelId，不记录 ticket、密钥或查询字符串。
 
 部署后可以手工验证：
 
@@ -200,7 +212,7 @@ sudo apt install -y docker-buildx-plugin
 
 主要配置文件是 `deploy/relay.env`。它包含访问密钥，已被 `.gitignore` 排除，不要提交或公开。
 
-修改配置后，重新运行 `./deploy.sh` 即可重建并重启。脚本会读取已保存的域名，因此更新时不必重复传入 `--domain`：
+修改配置后，重新运行 `./deploy.sh` 即可重建并重启。脚本会读取已保存的域名和认证模式，因此更新时不必重复传入 `--domain`、`--anonymous` 或 `--access-key`：
 
 ```bash
 git pull

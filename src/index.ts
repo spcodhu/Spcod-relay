@@ -23,6 +23,8 @@ export interface RelayConfig {
   accessKey?: string | null;
   /** 迁移期兼容无 ticket 客户端；配置访问密钥时始终强制票据。 */
   allowLegacyWs?: boolean;
+  /** 官方实例显式匿名模式：忽略遗留访问密钥并允许无 ticket WebSocket。 */
+  allowAnonymous?: boolean;
   /** 除 same-origin 外，允许调用票据 API/WS 的 PWA origins。 */
   corsAllowedOrigins?: string[];
   heartbeatMs?: number;
@@ -37,6 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
   };
   const bool = (v: string | undefined, dflt: boolean): boolean => (v == null ? dflt : v === "true");
+  const allowAnonymous = bool(env.RELAY_ALLOW_ANONYMOUS, false);
   return {
     port: int(env.PORT, 8787),
     staticDir: env.STATIC_DIR ?? "./public",
@@ -47,8 +50,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     maxChannels: int(env.MAX_CHANNELS, 1024),
     maxDevices: int(env.MAX_DEVICES_PER_CHANNEL, 16),
     queueBytesMax: int(env.QUEUE_BYTES_MAX_MB, 32) * 1024 * 1024,
-    accessKey: env.RELAY_ACCESS_KEY?.trim() || null,
-    allowLegacyWs: bool(env.ALLOW_LEGACY_WS, true),
+    accessKey: allowAnonymous ? null : env.RELAY_ACCESS_KEY?.trim() || null,
+    allowLegacyWs: allowAnonymous || bool(env.ALLOW_LEGACY_WS, true),
+    allowAnonymous,
     corsAllowedOrigins: (env.CORS_ALLOWED_ORIGINS ?? "")
       .split(",")
       .map((origin) => origin.trim())
@@ -224,9 +228,12 @@ export function createRelayServer(config: RelayConfig): RelayServer {
   });
   const staticDir = path.resolve(config.staticDir);
   const hasStatic = existsSync(staticDir) && statSync(staticDir).isDirectory();
-  const tickets = new TicketService(config.accessKey ?? null);
   const allowedOrigins = config.corsAllowedOrigins ?? [];
-  const allowLegacyWs = config.allowLegacyWs ?? true;
+  // 匿名模式是显式部署决策：即使 relay.env 残留旧密钥，也不能让官方客户端再次被 401。
+  const allowAnonymous = config.allowAnonymous ?? false;
+  const accessKey = allowAnonymous ? null : config.accessKey;
+  const tickets = new TicketService(accessKey ?? null);
+  const allowLegacyWs = allowAnonymous || (config.allowLegacyWs ?? true);
   const heartbeatMs = config.heartbeatMs ?? 30_000;
   const maxBufferedBytes = config.maxBufferedBytes ?? 1024 * 1024;
   const ticketRatePerMin = config.ticketRatePerMin ?? 60;
@@ -327,16 +334,26 @@ export function createRelayServer(config: RelayConfig): RelayServer {
       const role = url.searchParams.get("role") ?? "";
       const deviceId = url.searchParams.get("device") ?? undefined;
       const safeDeviceId = deviceId && /^[A-Za-z0-9_-]{1,64}$/.test(deviceId) ? deviceId : undefined;
-      const reject = (status: number, text: string) => {
+      const reject = (status: number, text: string, reason: string) => {
+        // 只记录稳定元数据；绝不能记录完整 URL、查询串、ticket、访问密钥或 Origin 请求头。
+        console.warn("[relay] ws upgrade rejected", {
+          status,
+          reason,
+          role: role === "host" || role === "device" ? role : "unknown",
+          channelId: CHANNEL_ID_RE.test(channelId) ? channelId : "invalid",
+        });
         socket.write(`HTTP/1.1 ${status} ${text}\r\n\r\n`);
         socket.destroy();
       };
-      if (!originAllowed(req.headers.origin, req.headers.host, allowedOrigins)) return reject(403, "Forbidden");
-      if (!CHANNEL_ID_RE.test(channelId) || (role !== "host" && role !== "device")) return reject(400, "Bad Request");
+      if (!originAllowed(req.headers.origin, req.headers.host, allowedOrigins)) {
+        return reject(403, "Forbidden", "origin_denied");
+      }
+      if (!CHANNEL_ID_RE.test(channelId)) return reject(400, "Bad Request", "invalid_channel");
+      if (role !== "host" && role !== "device") return reject(400, "Bad Request", "invalid_role");
       const binding = { channelId, role: role as Role, ...(safeDeviceId ? { deviceId: safeDeviceId } : {}) };
       const ticket = url.searchParams.get("ticket") ?? "";
       const ticketAccepted = ticket && tickets.consume(ticket, binding);
-      if ((config.accessKey || !allowLegacyWs) && !ticketAccepted) return reject(401, "Unauthorized");
+      if ((accessKey || !allowLegacyWs) && !ticketAccepted) return reject(401, "Unauthorized", "ticket_required");
       wss.handleUpgrade(req, socket, head, (ws) => attach(channelId, role as Role, ws, safeDeviceId));
     } catch {
       socket.destroy();
@@ -401,7 +418,8 @@ if (isMain) {
   const config = loadConfig();
   const { server, close } = createRelayServer(config);
   server.listen(config.port, () => {
-    console.log(`[relay] listening on :${config.port} static=${path.resolve(config.staticDir)}`);
+    const authMode = config.allowAnonymous || !config.accessKey ? "anonymous" : "access-key";
+    console.log(`[relay] listening on :${config.port} static=${path.resolve(config.staticDir)} auth=${authMode}`);
   });
   const shutdown = () => {
     void close().then(() => process.exit(0));

@@ -17,6 +17,8 @@ Usage:
   ./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
                                       Use custom Caddy host ports
   ./deploy.sh --no-tls                Disable Caddy and expose relay directly
+  ./deploy.sh --anonymous             Run an official public relay without an access key
+  ./deploy.sh --access-key            Require an access key (default for self-hosting)
 
 Requires Git, Docker 24+, and the Docker Compose v2 plugin.
 Configuration and the generated access key are stored in deploy/relay.env.
@@ -37,6 +39,7 @@ domain_override=""
 http_port_override=""
 https_port_override=""
 check_only=false
+auth_mode_override=""
 while (($# > 0)); do
   case "$1" in
     --check)
@@ -74,6 +77,14 @@ while (($# > 0)); do
       ;;
     --no-tls)
       mode="off"
+      shift
+      ;;
+    --anonymous)
+      auth_mode_override="anonymous"
+      shift
+      ;;
+    --access-key)
+      auth_mode_override="access-key"
       shift
       ;;
     -h|--help)
@@ -150,8 +161,23 @@ generate_access_key() {
   fi
 }
 
+case "${auth_mode_override}" in
+  anonymous)
+    set_env RELAY_ALLOW_ANONYMOUS true
+    set_env ALLOW_LEGACY_WS true
+    ;;
+  access-key)
+    set_env RELAY_ALLOW_ANONYMOUS false
+    ;;
+esac
+
+allow_anonymous="$(get_env RELAY_ALLOW_ANONYMOUS)"
 access_key="$(get_env RELAY_ACCESS_KEY)"
-if [[ -z "${access_key}" || "${access_key}" == replace-with-* ]]; then
+if [[ "${allow_anonymous}" == true ]]; then
+  # 保留旧密钥但由运行时明确忽略；不要把密钥打印到官方匿名模式的部署输出。
+  access_key=""
+  log "Anonymous mode is enabled; no relay access key is required."
+elif [[ -z "${access_key}" || "${access_key}" == replace-with-* ]]; then
   access_key="$(generate_access_key)"
   set_env RELAY_ACCESS_KEY "${access_key}"
   log "Generated a new RELAY_ACCESS_KEY."
@@ -246,13 +272,19 @@ else
   pwa_url="http://<SERVER_IP>:${relay_port}/"
 fi
 
+if [[ "${allow_anonymous}" == true ]]; then
+  access_key_display="not required (anonymous mode)"
+else
+  access_key_display="${access_key}"
+fi
+
 cat <<EOF
 
 Deployment completed successfully.
 
-Spcod harness settings -> Remote Control -> Self-hosted:
+Spcod harness relay settings:
   Relay URL:   ${relay_url}
-  Access key:  ${access_key}
+  Access key:  ${access_key_display}
 
 Health check: ${health_url}
 Mobile PWA:  ${pwa_url}

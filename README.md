@@ -56,6 +56,8 @@ cd Spcod-relay
 
 配置与密钥保存在 `deploy/relay.env`，该文件已被 Git 忽略。直接暴露的 HTTP/WebSocket 适合临时或内网使用；长期公网部署建议按下一步启用域名和 HTTPS。
 
+官方公共实例由维护者使用 `./deploy.sh --domain spcod-relay.hlt.cab --anonymous` 部署。该模式持久保存且无需访问密钥；普通自托管不要开启，恢复准入保护使用 `--access-key`。
+
 ## 验证安装与部署
 
 - **浏览器健康页**：打开 `http://<服务器IP>:8787/health`；配置域名后打开 `https://relay.example.com/health`。页面会根据浏览器语言显示中文或英文，只包含运行状态、协议版本和检查时间，不包含密钥或消息数据。

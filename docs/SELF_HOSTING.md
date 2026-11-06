@@ -16,7 +16,8 @@
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `DOMAIN` | 空 | TLS 域名；建议通过 `./deploy.sh --domain <域名>` 设置 |
-| `RELAY_ACCESS_KEY` | 脚本自动生成 | 自托管访问密钥；公网实例不要留空 |
+| `RELAY_ACCESS_KEY` | 脚本自动生成 | 自托管访问密钥；公网自托管实例不要留空 |
+| `RELAY_ALLOW_ANONYMOUS` | `false` | 仅官方公共实例由 `--anonymous` 开启；忽略遗留密钥并允许无 ticket WS |
 | `RELAY_BIND` | `0.0.0.0` | relay 宿主机端口绑定地址；启用 TLS 时脚本改为 `127.0.0.1` |
 | `RELAY_PORT` | `8787` | 无域名模式暴露的宿主机端口 |
 | `CADDY_HTTP_PORT` | `80` | Caddy HTTP 宿主机端口，可用 `--http-port` 设置 |
@@ -34,7 +35,9 @@
 | `TICKET_RATE_PER_MIN` | `60` | 每 IP 每分钟票据签发上限 |
 | `TRUST_PROXY` | `false` | 仅在可信反向代理后设为 `true`，用于读取转发 IP；TLS 模式自动启用 |
 
-修改 `deploy/relay.env` 后运行 `./deploy.sh` 使配置生效。
+修改 `deploy/relay.env` 后运行 `./deploy.sh` 使配置生效。也可以由部署脚本持久切换认证模式：`--anonymous` 仅用于官方公共实例，`--access-key` 恢复自托管默认的访问密钥保护；后续普通更新会保留所选模式。
+
+匿名模式只允许官方客户端免 ticket 建立 WebSocket，不会关闭端到端加密、channel/origin 校验或限流。启动日志中的 `auth=anonymous` / `auth=access-key` 可用于核对实际运行模式。
 
 ## PWA 托管与 origin
 

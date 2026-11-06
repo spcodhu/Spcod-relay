@@ -75,10 +75,22 @@ The script will:
 
 1. Check Git, Docker, and Compose;
 2. Create `deploy/relay.env` on the first run, readable and writable only by the current user;
-3. Generate a random 32-byte `RELAY_ACCESS_KEY`;
+3. Use self-hosted access-key mode by default and generate a random 32-byte `RELAY_ACCESS_KEY`;
 4. Build the `spcod-relay:local` image with both the relay and mobile PWA; the PWA is compiled inside Docker from a pinned Spcod source commit, with no file upload;
 5. Start the relay and wait for its `/health` check to pass;
 6. Print the relay URL and access key required by harness.
+
+### Official public instance: explicit anonymous mode
+
+Anonymous mode is only for maintainers of the official public relay; do not enable it for an ordinary self-hosted deployment. Official clients do not carry an access key, so the official instance must be deployed with:
+
+```bash
+./deploy.sh --domain spcod-relay.hlt.cab --anonymous
+```
+
+This persists `RELAY_ALLOW_ANONYMOUS=true` in `deploy/relay.env`. Later `git pull && ./deploy.sh` updates preserve anonymous mode instead of regenerating and enforcing the old key. Anonymous mode neither requires nor prints an access key. Run `./deploy.sh --access-key` to restore self-hosted access control.
+
+Anonymous mode disables only the relay access-key requirement. Channel validation, origin restrictions, rate limits, and phone-to-desktop end-to-end encryption remain unchanged. Startup logs show `auth=anonymous` or `auth=access-key`; WebSocket rejection logs contain only status, reason, role, and channelId, never tickets, keys, or query strings.
 
 After deployment, verify it manually:
 
@@ -200,7 +212,7 @@ Preserve the build cache: normal `git pull && ./deploy.sh` runs reuse it, while 
 
 The main configuration file is `deploy/relay.env`. It contains the access key, is excluded by `.gitignore`, and must not be committed or published.
 
-After changing configuration, rerun `./deploy.sh` to rebuild and restart. The script reads the saved domain, so updates do not need `--domain` again:
+After changing configuration, rerun `./deploy.sh` to rebuild and restart. The script reads the saved domain and authentication mode, so updates do not need `--domain`, `--anonymous`, or `--access-key` again:
 
 ```bash
 git pull

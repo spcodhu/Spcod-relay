@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
-import { createRelayServer, type RelayConfig, type RelayServer } from "../src/index.js";
+import { createRelayServer, loadConfig, type RelayConfig, type RelayServer } from "../src/index.js";
 
 const CID = "b".repeat(64);
 
@@ -151,6 +151,26 @@ describe("无静态目录时", () => {
   });
 });
 
+describe("认证部署配置", () => {
+  it("默认保留自托管访问密钥与 ALLOW_LEGACY_WS 行为", () => {
+    const cfg = loadConfig({ RELAY_ACCESS_KEY: " secret ", ALLOW_LEGACY_WS: "false" });
+    expect(cfg.allowAnonymous).toBe(false);
+    expect(cfg.accessKey).toBe("secret");
+    expect(cfg.allowLegacyWs).toBe(false);
+  });
+
+  it("显式匿名模式忽略遗留密钥并兼容官方无 ticket 客户端", () => {
+    const cfg = loadConfig({
+      RELAY_ALLOW_ANONYMOUS: "true",
+      RELAY_ACCESS_KEY: "old-secret",
+      ALLOW_LEGACY_WS: "false",
+    });
+    expect(cfg.allowAnonymous).toBe(true);
+    expect(cfg.accessKey).toBeNull();
+    expect(cfg.allowLegacyWs).toBe(true);
+  });
+});
+
 describe("WebSocket 协议", () => {
   let relay: RelayServer;
   let base: string;
@@ -251,6 +271,39 @@ describe("票据与生产连接治理", () => {
       await expect(connect(base, `/channel/${CID}?role=device`)).rejects.toThrow(/401/);
     } finally {
       await relay.close();
+    }
+  });
+
+  it("官方匿名模式忽略残留旧密钥，无 ticket 也能完成 WS 握手", async () => {
+    const { relay, base } = await start(
+      config({ accessKey: "old-secret", allowAnonymous: true, allowLegacyWs: false }),
+    );
+    try {
+      const host = await connect(base, `/channel/${CID}?role=host`);
+      expect(JSON.parse(await host.next())).toMatchObject({ t: "relay.hello", role: "host", version: 2 });
+      host.ws.close();
+      await host.closed;
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("WS 401 日志记录原因元数据但不泄露 ticket、密钥或查询串", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { relay, base } = await start(config({ accessKey: "server-secret" }));
+    try {
+      await expect(connect(base, `/channel/${CID}?role=device&ticket=client-ticket-secret`)).rejects.toThrow(/401/);
+      const output = warn.mock.calls
+        .map((call) => call.map((value) => (typeof value === "string" ? value : JSON.stringify(value))).join(" "))
+        .join("\n");
+      expect(output).toContain("ticket_required");
+      expect(output).toContain('"status":401');
+      expect(output).not.toContain("client-ticket-secret");
+      expect(output).not.toContain("server-secret");
+      expect(output).not.toContain("ticket=");
+    } finally {
+      await relay.close();
+      warn.mockRestore();
     }
   });
 

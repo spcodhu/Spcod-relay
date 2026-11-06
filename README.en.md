@@ -56,6 +56,8 @@ When deployment finishes, the terminal prints the relay URL and access key. In *
 
 Configuration and credentials are stored in `deploy/relay.env`, which is ignored by Git. Direct HTTP/WebSocket is intended for temporary or private-network use; enable a domain and HTTPS for a long-lived public deployment.
 
+Maintainers deploy the official public instance with `./deploy.sh --domain spcod-relay.hlt.cab --anonymous`. This persists anonymous mode and requires no access key. Ordinary self-hosted deployments must not enable it; use `--access-key` to restore access control.
+
 ## Verify installation and deployment
 
 - **Browser health page**: open `http://<SERVER_IP>:8787/health`, or `https://relay.example.com/health` after configuring a domain. It follows the browser's Chinese or English language preference and only shows service status, protocol version, and check time—never credentials or message data.
