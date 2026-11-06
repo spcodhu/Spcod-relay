@@ -6,7 +6,7 @@ Spcod harness 远程控制功能的自托管中继服务器。它只在手机与
 
 ## 检查与安装依赖
 
-部署只需要 Bash、Git、Docker Engine 24+ 和 Docker Compose 2.20+ 插件。先检查：
+部署只需要 Bash、Git、Docker Engine 24+、Docker Buildx 和 Docker Compose 2.20+ 插件。先检查：
 
 ```bash
 git --version
@@ -95,7 +95,7 @@ cd Spcod-relay
 
 | 用途 | 依赖 |
 |---|---|
-| 一键部署 | Bash、Git、Docker Engine 24.0+、Docker Compose 2.20+（`docker compose`） |
+| 一键部署 | Bash、Git、Docker Engine 24.0+、Docker Buildx、Docker Compose 2.20+（`docker compose`） |
 | 域名与证书 | Caddy 2（由 Compose 自动运行，无需单独安装） |
 | 本地开发 | Node.js 22.19+、pnpm 9.15.9 |
 
@@ -105,6 +105,8 @@ Docker 镜像使用 Node.js 22 Alpine，并在构建阶段锁定 pnpm 9.15.9。�
 
 新 Dockerfile 在首次构建时会下载 Node 基础镜像、固定版本的 Spcod 源码和手机端依赖。之后会分别复用基础镜像层、源码层、corepack 与 pnpm store 缓存；更新 PWA 版本时不会重新下载已经存在的 npm 包。
 
+`deploy.sh` 构建前会检查 `NODE_IMAGE`：本地已有该镜像时直接复用，不会再次拉取；本地缺失时才显式执行一次 `docker pull`。
+
 如果服务器访问 Docker Hub 或 npm 较慢，可在 `deploy/relay.env` 中覆盖：
 
 ```dotenv
@@ -113,6 +115,14 @@ NPM_REGISTRY=https://registry.npmmirror.com
 ```
 
 然后重新运行 `./deploy.sh`。`NODE_IMAGE` 也可以直接使用服务器上已经构建或导入的 Node 22 Alpine 镜像。Docker Hub 的加速地址请使用自己云厂商控制台提供的专属镜像加速器；配置 Docker daemon 的 `registry-mirrors` 后，基础镜像下载也会走同一通道。
+
+需要注意：`NODE_IMAGE=node:22-alpine` 仍然是 Docker Hub 标签，是否命中 daemon 镜像加速器由 Docker 决定。如果镜像加速器不稳定，应把 `NODE_IMAGE` 改为一个完整的、可直接访问的镜像仓库路径，例如云厂商镜像仓库中的 `.../library/node:22-alpine`。
+
+构建缓存依赖 Buildx。如果日志提示 `buildx isn't installed`，Ubuntu 可安装：
+
+```bash
+sudo apt install -y docker-buildx-plugin
+```
 
 首次构建后不要为了“清理”执行 `docker system prune`、`docker builder prune` 或带 `--no-cache` 的重建，否则 BuildKit 的 pnpm/corepack 缓存会被删除。正常执行 `git pull && ./deploy.sh` 会优先复用缓存。
 

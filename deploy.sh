@@ -95,6 +95,11 @@ if [[ "${check_only}" == true ]]; then
   log "$(git --version)"
   log "$(docker --version)"
   log "$(docker compose version)"
+  if docker buildx version >/dev/null 2>&1; then
+    log "$(docker buildx version | head -1)"
+  else
+    log "WARNING: docker buildx is missing; install the docker-buildx-plugin package for persistent BuildKit caches."
+  fi
   log "Docker daemon is running and accessible."
   log "All deployment dependencies are available."
   exit 0
@@ -182,6 +187,20 @@ validate_port --https-port "${caddy_https_port}"
 set_env CADDY_HTTP_PORT "${caddy_http_port}"
 set_env CADDY_HTTPS_PORT "${caddy_https_port}"
 compose=(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}")
+
+node_image="$(get_env NODE_IMAGE)"
+node_image="${node_image:-node:22-alpine}"
+if docker image inspect "${node_image}" >/dev/null 2>&1; then
+  log "Using local base image: ${node_image}"
+else
+  log "Base image is not present locally. Pulling it once: ${node_image}"
+  docker pull "${node_image}" || die "Could not pull the base image. Configure Docker registry mirrors or set NODE_IMAGE to an accessible Node 22 Alpine image."
+fi
+
+if ! docker buildx version >/dev/null 2>&1; then
+  export COMPOSE_BAKE=false
+  log "WARNING: docker buildx is not installed. Install the docker-buildx-plugin package to enable persistent BuildKit caches."
+fi
 
 if [[ -n "${domain}" ]]; then
   log "Building relay and starting Caddy for ${domain} (host HTTP ${caddy_http_port}, HTTPS ${caddy_https_port})..."

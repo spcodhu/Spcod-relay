@@ -10,7 +10,7 @@
 |---|---|
 | 操作系统 | 可运行 Docker 的 Linux，x86_64 或 arm64 |
 | 命令行 | Bash、Git |
-| 容器 | Docker Engine 24.0+，Docker Compose 2.20+ 插件 |
+| 容器 | Docker Engine 24.0+、Docker Buildx、Docker Compose 2.20+ 插件 |
 | 无域名部署 | 放行 TCP 8787，或仅在内网开放 |
 | 域名部署 | 域名 A/AAAA 记录指向服务器，放行 TCP 80、443；UDP 443 可选，用于 HTTP/3 |
 
@@ -169,6 +169,8 @@ wss://relay.example.com:8443
 
 首次构建会下载 Node 基础镜像、固定提交的 Spcod 源码和手机端依赖。Dockerfile 已将基础镜像、源码、pnpm 与 corepack 分成独立缓存层；后续更新会复用已有镜像层，pnpm store 通过 BuildKit cache mount 跨构建保留。
 
+`deploy.sh` 在构建前会检查 `NODE_IMAGE`：本地已有该镜像时直接复用；本地缺失时才显式预拉一次，避免 BuildKit 每次重新下载。
+
 如果 Docker Hub 或 npm 较慢，可在 `deploy/relay.env` 中增加：
 
 ```dotenv
@@ -185,6 +187,14 @@ NPM_REGISTRY=https://registry.npmmirror.com
 ```
 
 修改后执行 `sudo systemctl daemon-reload && sudo systemctl restart docker`。如果文件已有其他配置，请合并 JSON，不要直接覆盖。
+
+`NODE_IMAGE=node:22-alpine` 仍然是 Docker Hub 标签，是否经过 daemon 镜像加速器由 Docker 决定。如果加速器没有命中或比较慢，应把 `NODE_IMAGE` 改成镜像仓库中的完整路径；也可以先在服务器执行 `docker pull node:22-alpine` 完成一次下载，之后 `deploy.sh` 会直接复用本地镜像。
+
+缓存挂载需要 Docker Buildx。日志出现 `buildx isn't installed` 时，Ubuntu 可执行：
+
+```bash
+sudo apt install -y docker-buildx-plugin
+```
 
 保留构建缓存很重要：正常执行 `git pull && ./deploy.sh` 会复用缓存；`docker system prune`、`docker builder prune`、`docker compose build --no-cache` 会删除缓存并导致重新下载。只有缓存损坏或排查构建问题时才使用 `--no-cache`。
 

@@ -6,7 +6,7 @@ A self-hosted relay for Spcod harness remote control. It routes end-to-end encry
 
 ## Check and install dependencies
 
-Deployment only requires Bash, Git, Docker Engine 24+, and the Docker Compose 2.20+ plugin. Check them first:
+Deployment only requires Bash, Git, Docker Engine 24+, Docker Buildx, and the Docker Compose 2.20+ plugin. Check them first:
 
 ```bash
 git --version
@@ -95,7 +95,7 @@ These options only change Docker host-port mappings; Caddy still uses 80/443 ins
 
 | Use case | Dependencies |
 |---|---|
-| One-command deployment | Bash, Git, Docker Engine 24.0+, Docker Compose 2.20+ (`docker compose`) |
+| One-command deployment | Bash, Git, Docker Engine 24.0+, Docker Buildx, Docker Compose 2.20+ (`docker compose`) |
 | Domain and TLS | Caddy 2 (started automatically by Compose; no separate installation) |
 | Local development | Node.js 22.19+, pnpm 9.15.9 |
 
@@ -105,6 +105,8 @@ The Docker image uses Node.js 22 Alpine and pins pnpm 9.15.9 during the build. T
 
 The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. Later builds reuse separate base-image, source, corepack, and pnpm-store layers/caches; upgrading the PWA does not download npm packages that are already present.
 
+Before building, `deploy.sh` checks `NODE_IMAGE`. If the image already exists locally it is reused without another pull; only a missing image triggers an explicit `docker pull`.
+
 If Docker Hub or npm is slow from the server, override these values in `deploy/relay.env`:
 
 ```dotenv
@@ -113,6 +115,14 @@ NPM_REGISTRY=https://registry.npmmirror.com
 ```
 
 Then run `./deploy.sh` again. `NODE_IMAGE` can also reference a Node 22 Alpine image already built or imported on the server. Obtain the Docker Hub accelerator URL from your own cloud provider console; configuring Docker daemon `registry-mirrors` also accelerates base-image downloads.
+
+Note that `NODE_IMAGE=node:22-alpine` is still a Docker Hub tag; whether Docker routes it through a daemon registry mirror is up to Docker. If the mirror is unreliable, set `NODE_IMAGE` to a complete, directly accessible image repository path, such as `.../library/node:22-alpine` in your cloud provider's registry.
+
+Build caches require Buildx. If the log says `buildx isn't installed`, install it on Ubuntu with:
+
+```bash
+sudo apt install -y docker-buildx-plugin
+```
 
 After the first successful build, do not run `docker system prune`, `docker builder prune`, or a `--no-cache` rebuild merely to “clean up”; those commands remove the BuildKit pnpm/corepack caches. Normal `git pull && ./deploy.sh` runs reuse them.
 

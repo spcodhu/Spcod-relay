@@ -10,7 +10,7 @@ This guide starts with a fresh remote Linux server. Deployment does not require 
 |---|---|
 | Operating system | Linux with Docker support, x86_64 or arm64 |
 | Command line | Bash and Git |
-| Containers | Docker Engine 24.0+ with the Docker Compose 2.20+ plugin |
+| Containers | Docker Engine 24.0+, Docker Buildx, and the Docker Compose 2.20+ plugin |
 | Deployment without a domain | Allow TCP 8787, or expose it only on a private network |
 | Deployment with a domain | Point A/AAAA records at the server and allow TCP 80 and 443; UDP 443 is optional for HTTP/3 |
 
@@ -169,6 +169,8 @@ wss://relay.example.com:8443
 
 The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. The Dockerfile separates the base image, source, pnpm, and corepack caches. Later builds reuse existing image layers, while the pnpm store persists across builds through BuildKit cache mounts.
 
+Before building, `deploy.sh` checks `NODE_IMAGE`. It reuses an existing local image and only performs an explicit pull when the image is missing, preventing BuildKit from downloading the base again on every run.
+
 If Docker Hub or npm is slow, add these values to `deploy/relay.env`:
 
 ```dotenv
@@ -185,6 +187,14 @@ Then run `./deploy.sh`. For Docker Hub, use the accelerator URL assigned by your
 ```
 
 Then run `sudo systemctl daemon-reload && sudo systemctl restart docker`. If the file already contains other settings, merge the JSON instead of replacing it.
+
+`NODE_IMAGE=node:22-alpine` is still a Docker Hub tag; Docker decides whether it uses the daemon registry mirror. If the mirror is not used or remains slow, change `NODE_IMAGE` to a complete image path in an accessible registry. You can also run `docker pull node:22-alpine` once on the server; subsequent `deploy.sh` runs reuse the local image.
+
+Cache mounts require Docker Buildx. If the log says `buildx isn't installed`, install it on Ubuntu with:
+
+```bash
+sudo apt install -y docker-buildx-plugin
+```
 
 Preserve the build cache: normal `git pull && ./deploy.sh` runs reuse it, while `docker system prune`, `docker builder prune`, and `docker compose build --no-cache` remove it and force fresh downloads. Use `--no-cache` only when diagnosing a broken build.
 
