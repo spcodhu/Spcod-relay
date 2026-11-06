@@ -167,7 +167,7 @@ wss://relay.example.com:8443
 
 ### 构建缓存与加速
 
-首次构建会下载 Node 基础镜像、固定提交的 Spcod 源码和手机端依赖。Dockerfile 已将基础镜像、源码、pnpm 与 corepack 分成独立缓存层；后续更新会复用已有镜像层，pnpm store 通过 BuildKit cache mount 跨构建保留。
+首次构建会下载 Node 基础镜像、固定提交的 Spcod 源码和手机端依赖。Dockerfile 已将基础镜像、源码、npm 下载缓存与 pnpm 分成独立层；后续更新会复用已有镜像层，pnpm store 通过 BuildKit cache mount 跨构建保留。pnpm 固定版本直接安装进镜像层，不依赖 Corepack 临时下载。
 
 `deploy.sh` 在构建前会检查 `NODE_IMAGE`：本地已有该镜像时直接复用；本地缺失时才显式预拉一次，避免 BuildKit 每次重新下载。
 

@@ -103,7 +103,7 @@ The Docker image uses Node.js 22 Alpine and pins pnpm 9.15.9 during the build. T
 
 ## Build cache and mirror acceleration
 
-The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. Later builds reuse separate base-image, source, corepack, and pnpm-store layers/caches; upgrading the PWA does not download npm packages that are already present.
+The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. Later builds reuse separate base-image, source, npm-download, and pnpm-store layers/caches; upgrading the PWA does not download packages that are already present. The pinned pnpm version is installed into an image layer through npm, so later stages do not rely on Corepack downloading it again.
 
 Before building, `deploy.sh` checks `NODE_IMAGE`. If the image already exists locally it is reused without another pull; only a missing image triggers an explicit `docker pull`.
 
@@ -124,7 +124,7 @@ Build caches require Buildx. If the log says `buildx isn't installed`, install i
 sudo apt install -y docker-buildx-plugin
 ```
 
-After the first successful build, do not run `docker system prune`, `docker builder prune`, or a `--no-cache` rebuild merely to “clean up”; those commands remove the BuildKit pnpm/corepack caches. Normal `git pull && ./deploy.sh` runs reuse them.
+After the first successful build, do not run `docker system prune`, `docker builder prune`, or a `--no-cache` rebuild merely to “clean up”; those commands remove the BuildKit npm/pnpm caches. Normal `git pull && ./deploy.sh` runs reuse them.
 
 ## Local development
 

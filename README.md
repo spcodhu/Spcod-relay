@@ -103,7 +103,7 @@ Docker 镜像使用 Node.js 22 Alpine，并在构建阶段锁定 pnpm 9.15.9。�
 
 ## 构建缓存与镜像加速
 
-新 Dockerfile 在首次构建时会下载 Node 基础镜像、固定版本的 Spcod 源码和手机端依赖。之后会分别复用基础镜像层、源码层、corepack 与 pnpm store 缓存；更新 PWA 版本时不会重新下载已经存在的 npm 包。
+新 Dockerfile 在首次构建时会下载 Node 基础镜像、固定版本的 Spcod 源码和手机端依赖。之后会分别复用基础镜像层、源码层、npm 下载缓存与 pnpm store；更新 PWA 版本时不会重新下载已经存在的包。固定版本的 pnpm 会通过 npm 安装进镜像层，不再依赖 Corepack 在后续阶段临时下载。
 
 `deploy.sh` 构建前会检查 `NODE_IMAGE`：本地已有该镜像时直接复用，不会再次拉取；本地缺失时才显式执行一次 `docker pull`。
 
@@ -124,7 +124,7 @@ NPM_REGISTRY=https://registry.npmmirror.com
 sudo apt install -y docker-buildx-plugin
 ```
 
-首次构建后不要为了“清理”执行 `docker system prune`、`docker builder prune` 或带 `--no-cache` 的重建，否则 BuildKit 的 pnpm/corepack 缓存会被删除。正常执行 `git pull && ./deploy.sh` 会优先复用缓存。
+首次构建后不要为了“清理”执行 `docker system prune`、`docker builder prune` 或带 `--no-cache` 的重建，否则 BuildKit 的 npm/pnpm 缓存会被删除。正常执行 `git pull && ./deploy.sh` 会优先复用缓存。
 
 ## 本地开发
 

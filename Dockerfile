@@ -4,7 +4,14 @@
 ARG NODE_IMAGE=node:22-alpine
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
-FROM ${NODE_IMAGE} AS pwa
+# 把精确版本的 pnpm 安装到镜像层。Corepack 的缓存不会进入后续构建阶段，
+# 直接安装可避免每个 RUN 再次从 npm registry 下载 pnpm。
+FROM ${NODE_IMAGE} AS pnpm
+ARG NPM_REGISTRY
+RUN --mount=type=cache,id=spcod-npm,target=/root/.npm \
+    npm_config_registry="${NPM_REGISTRY}" npm install --global --no-audit --no-fund pnpm@9.15.9
+
+FROM pnpm AS pwa
 ARG SPCOD_PWA_REPOSITORY=https://github.com/spcodhu/Spcode
 ARG SPCOD_PWA_REF=1e8f4a9653edde0ae5e87585bd049b10b2f290a5
 ARG NPM_REGISTRY
@@ -30,24 +37,16 @@ if (lastError) throw lastError;\
 ' "${SPCOD_PWA_REPOSITORY}/archive/${SPCOD_PWA_REF}.tar.gz" /tmp/spcod-pwa.tar.gz \
   && mkdir -p /pwa \
   && tar -xzf /tmp/spcod-pwa.tar.gz --strip-components=1 -C /pwa
-RUN --mount=type=cache,id=spcod-corepack,target=/root/.cache/node/corepack \
-    --mount=type=cache,id=spcod-pnpm-store,target=/root/.local/share/pnpm/store \
-    export npm_config_registry="${NPM_REGISTRY}"; \
-    corepack enable \
-  && corepack prepare pnpm@9.15.9 --activate \
-  && pnpm install --frozen-lockfile --filter @spcode/mobile...
+RUN --mount=type=cache,id=spcod-pnpm-store,target=/root/.local/share/pnpm/store \
+    npm_config_registry="${NPM_REGISTRY}" pnpm install --frozen-lockfile --filter @spcode/mobile...
 RUN pnpm --filter @spcode/mobile build
 
-FROM ${NODE_IMAGE} AS deps
+FROM pnpm AS deps
 ARG NPM_REGISTRY
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,id=spcod-corepack,target=/root/.cache/node/corepack \
-    --mount=type=cache,id=spcod-pnpm-store,target=/root/.local/share/pnpm/store \
-    export npm_config_registry="${NPM_REGISTRY}"; \
-    corepack enable \
-  && corepack prepare pnpm@9.15.9 --activate \
-  && pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=spcod-pnpm-store,target=/root/.local/share/pnpm/store \
+    npm_config_registry="${NPM_REGISTRY}" pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY tsconfig.json ./

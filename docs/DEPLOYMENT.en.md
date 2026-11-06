@@ -167,7 +167,7 @@ wss://relay.example.com:8443
 
 ### Build cache and acceleration
 
-The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. The Dockerfile separates the base image, source, pnpm, and corepack caches. Later builds reuse existing image layers, while the pnpm store persists across builds through BuildKit cache mounts.
+The first build downloads the Node base image, the pinned Spcod source archive, and mobile dependencies. The Dockerfile separates the base image, source, npm-download cache, and pnpm into distinct layers. Later builds reuse existing layers, while the pnpm store persists across builds through BuildKit cache mounts. The pinned pnpm version is installed directly into an image layer and does not rely on Corepack downloads.
 
 Before building, `deploy.sh` checks `NODE_IMAGE`. It reuses an existing local image and only performs an explicit pull when the image is missing, preventing BuildKit from downloading the base again on every run.
 

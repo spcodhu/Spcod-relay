@@ -198,8 +198,7 @@ else
 fi
 
 if ! docker buildx version >/dev/null 2>&1; then
-  export COMPOSE_BAKE=false
-  log "WARNING: docker buildx is not installed. Install the docker-buildx-plugin package to enable persistent BuildKit caches."
+  log "WARNING: docker buildx is not installed. Install the docker-buildx-plugin package to enable persistent BuildKit caches; continuing with the available builder."
 fi
 
 if [[ -n "${domain}" ]]; then
