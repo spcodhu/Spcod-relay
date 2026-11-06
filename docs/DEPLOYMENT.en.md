@@ -76,7 +76,7 @@ The script will:
 1. Check Git, Docker, and Compose;
 2. Create `deploy/relay.env` on the first run, readable and writable only by the current user;
 3. Generate a random 32-byte `RELAY_ACCESS_KEY`;
-4. Build the `spcod-relay:local` image from the checked-out source;
+4. Build the `spcod-relay:local` image with both the relay and mobile PWA; the PWA is compiled inside Docker from a pinned Spcod source commit, with no file upload;
 5. Start the relay and wait for its `/health` check to pass;
 6. Print the relay URL and access key required by harness.
 
@@ -208,6 +208,13 @@ The offline queue is memory-only. Clients must reconnect after a restart or upda
 
 ## 7. PWA and cross-origin configuration
 
+The Docker image includes the mobile PWA. No manual build, upload, or volume configuration is required. After deployment, open the relay root URL to pair:
+
+- Without a domain: `http://<SERVER_IP>:8787/`
+- With a domain and HTTPS: `https://relay.example.com/`
+
+Later `git pull && ./deploy.sh` runs update both the relay and PWA. The Spcod source commit is pinned by `SPCOD_PWA_REF` in the `Dockerfile`; maintainers update that commit and push the repository to release a newer PWA.
+
 No extra CORS configuration is needed when the mobile PWA and relay use the same origin. For an official or self-hosted PWA on another origin, set the complete origins in `deploy/relay.env`, separated by commas:
 
 ```dotenv
@@ -225,5 +232,6 @@ Then rerun `./deploy.sh`. Do not include paths or wildcards.
 - **The mobile PWA receives `origin_denied`**: add its complete origin to `CORS_ALLOWED_ORIGINS`.
 - **The access key is lost**: read `RELAY_ACCESS_KEY` from `deploy/relay.env` on the server and re-enter it in the clients.
 - **The deployment health check fails**: inspect the relay with the Compose `logs --tail=100 relay` command.
+- **The PWA build stage fails**: verify that the server can reach GitHub and that the pinned Spcod commit exists; do not switch to a local file-upload workflow.
 
 See the [self-hosting guide](SELF_HOSTING.md) for advanced runtime settings.

@@ -206,6 +206,12 @@ if [[ "${healthy}" != true ]]; then
   die "Relay did not become healthy. Check the logs above."
 fi
 
+log "Checking the embedded mobile PWA..."
+if ! "${compose[@]}" exec -T relay wget -qO- http://127.0.0.1:8787/ | grep -q '<title>Spcod</title>'; then
+  "${compose[@]}" logs --tail=50 relay >&2 || true
+  die "The embedded mobile PWA is unavailable. Rebuild the image and check the logs above."
+fi
+
 if [[ -n "${domain}" ]]; then
   if ! "${compose[@]}" --profile tls ps --status running --services | awk '$0 == "caddy" { found = 1 } END { exit !found }'; then
     "${compose[@]}" --profile tls logs --tail=50 caddy >&2 || true
@@ -215,9 +221,11 @@ if [[ -n "${domain}" ]]; then
   if [[ "${caddy_https_port}" != "443" ]]; then public_address="${domain}:${caddy_https_port}"; fi
   relay_url="wss://${public_address}"
   health_url="https://${public_address}/health"
+  pwa_url="https://${public_address}/"
 else
   relay_url="ws://<SERVER_IP>:${relay_port}"
   health_url="http://<SERVER_IP>:${relay_port}/health"
+  pwa_url="http://<SERVER_IP>:${relay_port}/"
 fi
 
 cat <<EOF
@@ -229,6 +237,7 @@ Spcod harness settings -> Remote Control -> Self-hosted:
   Access key:  ${access_key}
 
 Health check: ${health_url}
+Mobile PWA:  ${pwa_url}
 Configuration: ${ENV_FILE}
 
 EOF

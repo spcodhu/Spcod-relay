@@ -47,7 +47,7 @@ cd Spcod-relay
 ./deploy.sh
 ```
 
-脚本会自动完成：生成本地配置文件和随机访问密钥、从当前源码构建镜像、启动服务并等待健康检查。无需安装 Node.js、pnpm，也无需手工复制或编辑配置。
+脚本会自动完成：生成本地配置文件和随机访问密钥、构建**同时包含 relay 与手机 PWA** 的镜像、启动服务并等待健康检查。PWA 在 Docker 构建阶段从固定提交的 Spcod 源码生成，无需安装 Node.js、pnpm，也无需上传文件或手工编辑 Compose。
 
 部署完成后，终端会显示 Relay 地址和访问密钥。在 **Spcod harness → 设置 → 远程控制 → 自托管**中填写：
 
@@ -63,6 +63,8 @@ cd Spcod-relay
 - **容器状态**：运行 `docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls ps`，确认 relay 为 `healthy`；启用域名后 Caddy 应为 `running`。
 
 `/health` 会按请求头的 `Accept` 自动区分浏览器 HTML 与 JSON，无需维护两个检查地址。
+
+手机配对页也随镜像一起部署：打开 `http://<服务器IP>:8787/`，配置域名后打开 `https://relay.example.com/`。部署脚本会同时检查 relay 健康状态与内置 PWA，根路径应显示 Spcod 配对页。
 
 ## 后续配置域名与自动证书
 
@@ -120,7 +122,7 @@ curl http://127.0.0.1:8787/health
 
 1. **按 channel 路由密文**：channel 标识是桌面端公钥的 SHA-256 哈希，业务帧原样转发。
 2. **离线消息队列**：对方不在线时按 channel 分方向缓存密文，上线后按序补投；队列仅在内存中，重启后由客户端重连恢复。
-3. **可选托管 PWA**：将手机端构建产物放入 `STATIC_DIR` 即可通过 relay 提供静态页面。
+3. **内置手机 PWA**：Docker 构建阶段从固定提交的 Spcod 源码构建 PWA，并放入最终镜像的 `/app/public`；relay 与配对页通过同一入口提供。
 4. **准入保护**：自托管实例默认生成访问密钥；客户端用长期密钥换取 30 秒单次 ticket，再通过 WebSocket 连接。
 
 relay 没有账号体系，不记录消息明文，也不把离线队列持久化到磁盘。
@@ -143,6 +145,8 @@ docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profil
 ```
 
 更多环境变量、PWA origin 和反向代理配置见[自托管指南](docs/SELF_HOSTING.md)。
+
+维护者需要升级内置 PWA 时，只需更新 `Dockerfile` 中 `ARG SPCOD_PWA_REF` 对应的 Spcod 提交并推送本仓库。官方中继与自托管用户随后都通过 `git pull && ./deploy.sh` 获得同一版本，不产生另一套上传流程。
 
 ## 许可
 

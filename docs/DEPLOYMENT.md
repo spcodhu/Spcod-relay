@@ -76,7 +76,7 @@ cd Spcod-relay
 1. 检查 Git、Docker 与 Compose；
 2. 首次运行时创建 `deploy/relay.env`，权限设为仅当前用户可读写；
 3. 自动生成 32 字节随机 `RELAY_ACCESS_KEY`；
-4. 从当前源码构建 `spcod-relay:local` 镜像；
+4. 构建包含 relay 与手机 PWA 的 `spcod-relay:local` 镜像；PWA 从固定提交的 Spcod 源码在 Docker 内构建，无需上传文件；
 5. 启动 relay 并等待 `/health` 健康检查通过；
 6. 输出 harness 所需的 Relay 地址和访问密钥。
 
@@ -208,6 +208,13 @@ docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profil
 
 ## 7. PWA 与跨域配置
 
+Docker 镜像已内置手机 PWA，无需手工构建、上传或配置 volume。部署完成后直接打开 relay 根路径即可配对：
+
+- 无域名：`http://<服务器IP>:8787/`
+- 域名与 HTTPS：`https://relay.example.com/`
+
+后续 `git pull && ./deploy.sh` 会同时更新 relay 与 PWA。PWA 源码提交由 `Dockerfile` 的 `SPCOD_PWA_REF` 固定，维护者升级该提交后推送仓库即可。
+
 如果手机端 PWA 与 relay 使用同一个域名和端口，无需额外配置 CORS。若使用其他域名下的官方或自托管 PWA，在 `deploy/relay.env` 中设置完整 origin，多个值用英文逗号分隔：
 
 ```dotenv
@@ -225,5 +232,6 @@ CORS_ALLOWED_ORIGINS=https://app.example.com,https://another.example.com
 - **手机 PWA 返回 `origin_denied`**：把 PWA 的完整 origin 加入 `CORS_ALLOWED_ORIGINS`。
 - **密钥遗失**：在服务器上查看 `deploy/relay.env` 的 `RELAY_ACCESS_KEY`，然后重新填写到客户端。
 - **部署健康检查失败**：运行 Compose 的 `logs --tail=100 relay` 查看日志。
+- **PWA 构建阶段失败**：确认服务器能访问 GitHub，并检查 Dockerfile 中固定的 Spcod 提交是否存在；无需改为本机上传文件。
 
 更多运行参数见[自托管指南](SELF_HOSTING.md)。

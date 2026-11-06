@@ -38,12 +38,14 @@
 
 ## PWA 托管与 origin
 
-relay 可以通过 `STATIC_DIR` 托管手机端 PWA 构建产物。完全自托管 PWA 时，在 Compose 的 relay 服务中把构建产物只读挂载到 `/app/public`，再重新部署。
+最终 Docker 镜像默认内置手机 PWA。构建时会从 `Dockerfile` 中 `SPCOD_PWA_REF` 固定的 Spcod 提交编译手机端，并复制到 `/app/public`；运行 `./deploy.sh` 即可完成 relay 与 PWA 部署，不需要手工挂载目录。
 
 两种连接方式：
 
 1. **现有官方 PWA + 自托管 relay**：保持 PWA origin 不变，并把该 origin 加入 `CORS_ALLOWED_ORIGINS`。
-2. **PWA 与 relay 同源**：无需额外 CORS 配置。不同 origin 的 IndexedDB 不共享，首次使用需要重新配对；不要导出私钥进行迁移。
+2. **镜像内置 PWA 与 relay 同源**：无需额外 CORS 配置，直接打开 relay 根路径。不同 origin 的 IndexedDB 不共享，首次使用需要重新配对；不要导出私钥进行迁移。
+
+升级内置 PWA 时，维护者更新 `SPCOD_PWA_REF` 并推送仓库；部署者运行 `git pull && ./deploy.sh`。`STATIC_DIR` 仍可用于本地开发或特殊定制，但不再是默认部署步骤。
 
 ## 使用其他反向代理
 

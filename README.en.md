@@ -47,7 +47,7 @@ cd Spcod-relay
 ./deploy.sh
 ```
 
-The script generates the local configuration and a random access key, builds an image from the checked-out source, starts the service, and waits for its health check. Node.js, pnpm, and manual configuration are not required.
+The script generates the local configuration and a random access key, builds **one image containing both the relay and mobile PWA**, starts the service, and waits for its health check. The PWA is built during the Docker build from a pinned Spcod source commit. Node.js, pnpm, file uploads, and manual Compose edits are not required.
 
 When deployment finishes, the terminal prints the relay URL and access key. In **Spcod harness → Settings → Remote Control → Self-hosted**, enter:
 
@@ -63,6 +63,8 @@ Configuration and credentials are stored in `deploy/relay.env`, which is ignored
 - **Container status**: run `docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls ps`. The relay should be `healthy`; Caddy should be `running` when a domain is enabled.
 
 `/health` uses the `Accept` request header to serve HTML to browsers and JSON to automation, so both use the same endpoint.
+
+The mobile pairing page ships in the same image. Open `http://<SERVER_IP>:8787/`, or `https://relay.example.com/` after configuring a domain. The deployment script checks both relay health and the embedded PWA; the root URL should display the Spcod pairing page.
 
 ## Add a domain and automatic TLS later
 
@@ -120,7 +122,7 @@ curl http://127.0.0.1:8787/health
 
 1. **Routes ciphertext by channel**: the channel ID is the SHA-256 hash of the desktop public key; application frames are forwarded unchanged.
 2. **Queues offline messages**: ciphertext is queued by channel and direction while a peer is offline, then delivered in order. The queue is memory-only; clients reconnect and recover after a restart.
-3. **Optionally hosts the PWA**: place mobile build artifacts in `STATIC_DIR` to serve them from the relay.
+3. **Includes the mobile PWA**: the Docker build compiles the PWA from a pinned Spcod source commit and places it in `/app/public` in the final image, serving the relay and pairing page through the same entry point.
 4. **Controls access**: self-hosted deployments generate an access key by default. Clients exchange it for a 30-second, single-use ticket before opening a WebSocket.
 
 The relay has no account system, does not log message plaintext, and never persists the offline queue to disk.
@@ -143,6 +145,8 @@ docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profil
 ```
 
 See the [self-hosting guide](docs/SELF_HOSTING.md) for environment variables, PWA origins, and reverse-proxy configuration.
+
+To upgrade the embedded PWA, maintainers update the Spcod commit in `ARG SPCOD_PWA_REF` in the `Dockerfile` and push this repository. Official and self-hosted relays then receive the same version through `git pull && ./deploy.sh`; there is no separate upload workflow.
 
 ## License
 
