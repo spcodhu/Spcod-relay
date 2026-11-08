@@ -1,5 +1,5 @@
 import { TokenBucket } from "./ratelimit.js";
-import { RELAY_PROTOCOL_VERSION } from "./protocol.js";
+import { RELAY_CLOSE, RELAY_PROTOCOL_VERSION } from "./protocol.js";
 
 /**
  * 哑中继核心：channel 注册表、按角色路由、离线队列。
@@ -27,9 +27,13 @@ export interface RelayOptions {
   queueTtlMs?: number;
   /** 单帧最大字节数，默认 256KB */
   frameMaxBytes?: number;
-  /** 每 channel 每秒帧数上限（令牌桶），默认 60 */
+  /**
+   * 每条 device 连接每秒帧数上限（令牌桶），默认 60。
+   * 按连接而非按 channel 计——否则一台刷爆的设备会让同 channel 的 host 与其他设备一起饿死。
+   * host 一条连接承载全部设备流量，桶容量 = ratePerSec × maxDevices。
+   */
   ratePerSec?: number;
-  /** 全局 channel 数上限（默认 1024）——任意 64-hex 即建 channel 是内存 DoS 面（评审 R3-C9） */
+  /** 全局 channel 数上限（默认 1024）——channel 只由已证明所有权的 host / 持令牌的 device 创建 */
   maxChannels?: number;
   /** 每 channel 设备数上限（默认 16） */
   maxDevices?: number;
@@ -57,11 +61,12 @@ interface ChannelState {
    * "*" 槽 = 无 deviceId 的帧（pair_ack 等配对期帧，任何上线设备都可收）。
    */
   toDevices: Map<string, QueuedFrame[]>;
-  bucket: TokenBucket;
 }
 
 export class RelayCore {
   private readonly channels = new Map<string, ChannelState>();
+  /** 每条连接一个令牌桶（连接断开即回收） */
+  private readonly buckets = new WeakMap<Conn, TokenBucket>();
   private readonly queueMax: number;
   private readonly queueTtlMs: number;
   private readonly frameMaxBytes: number;
@@ -89,7 +94,8 @@ export class RelayCore {
   }
 
   /**
-   * 注册连接。host 冲突时以 close code 4001 拒绝后者；设备数超限以 4002 拒绝。
+   * 注册连接。host 已存在时**新连接接管**（准入层已证明两者持有同一桌面私钥；旧连接多半是
+   * 尚未被心跳发现的死连接），旧连接以 4001 关闭；设备数超限以 4002 拒绝；同 deviceId 替换以 4003。
    * 成功后先发 relay.hello，再按序补投该方向的离线帧（device 按 deviceId 槽位 + "*" 槽）。
    */
   connect(channelId: string, role: Role, conn: Conn, opts?: { deviceId?: string }): ConnectResult {
@@ -99,7 +105,7 @@ export class RelayCore {
     let ch = this.channels.get(channelId);
     if (!ch) {
       if (this.channels.size >= this.maxChannels) {
-        conn.close(4013, "server_full");
+        conn.close(RELAY_CLOSE.SERVER_FULL, "server_full");
         return { ok: false, reason: "server_full" };
       }
       ch = {
@@ -107,20 +113,21 @@ export class RelayCore {
         devices: new Set(),
         toHost: [],
         toDevices: new Map(),
-        bucket: new TokenBucket(this.ratePerSec, this.now),
       };
       this.channels.set(channelId, ch);
     }
 
     if (role === "host") {
       if (ch.host) {
-        conn.close(4001, "host_exists");
-        return { ok: false, reason: "host_exists" };
+        const old = ch.host;
+        ch.host = null;
+        old.close(RELAY_CLOSE.HOST_REPLACED, "host_replaced");
       }
       ch.host = conn;
+      this.buckets.set(conn, new TokenBucket(this.ratePerSec * this.maxDevices, this.now));
     } else {
       if (ch.devices.size >= this.maxDevices) {
-        conn.close(4002, "channel_full");
+        conn.close(RELAY_CLOSE.CHANNEL_FULL, "channel_full");
         return { ok: false, reason: "channel_full" };
       }
       if (opts?.deviceId) {
@@ -128,11 +135,12 @@ export class RelayCore {
         for (const existing of ch.devices) {
           if (existing.deviceId === opts.deviceId) {
             ch.devices.delete(existing);
-            existing.close(4003, "device_replaced");
+            existing.close(RELAY_CLOSE.DEVICE_REPLACED, "device_replaced");
           }
         }
       }
       ch.devices.add(conn);
+      this.buckets.set(conn, new TokenBucket(this.ratePerSec, this.now));
     }
 
     // 补投：host 收 toHost 全部；device 收自己槽位 + "*" 槽（配对期无 deviceId 的帧）
@@ -161,7 +169,8 @@ export class RelayCore {
       this.error(conn, "frame_too_large");
       return;
     }
-    if (!ch.bucket.tryTake()) {
+    const bucket = this.buckets.get(conn);
+    if (!bucket || !bucket.tryTake()) {
       this.error(conn, "rate_limited");
       return;
     }
@@ -191,6 +200,7 @@ export class RelayCore {
 
   /** 连接断开。无任何连接且无离线帧时回收 channel。 */
   disconnect(channelId: string, conn: Conn): void {
+    this.buckets.delete(conn);
     const ch = this.channels.get(channelId);
     if (!ch) return;
     if (conn.role === "host") {

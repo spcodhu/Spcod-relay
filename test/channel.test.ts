@@ -62,7 +62,7 @@ describe("channel 路由", () => {
     const core = new RelayCore();
     const host = new FakeConn("host");
     core.connect(CID, "host", host);
-    expect(host.hello()).toEqual({ t: "relay.hello", role: "host", queued: 0, version: 2 });
+    expect(host.hello()).toEqual({ t: "relay.hello", role: "host", queued: 0, version: 3 });
   });
 });
 
@@ -76,7 +76,7 @@ describe("离线队列", () => {
 
     const host = new FakeConn("host");
     core.connect(CID, "host", host);
-    expect(host.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "host", queued: 2, version: 2 }), "m1", "m2"]);
+    expect(host.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "host", queued: 2, version: 3 }), "m1", "m2"]);
   });
 
   it("无 device 时缓存 host→device 帧，首个 device 上线补投", () => {
@@ -87,7 +87,7 @@ describe("离线队列", () => {
 
     const dev = new FakeConn("device");
     core.connect(CID, "device", dev);
-    expect(dev.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "device", queued: 1, version: 2 }), "h1"]);
+    expect(dev.messages).toEqual([JSON.stringify({ t: "relay.hello", role: "device", queued: 1, version: 3 }), "h1"]);
 
     // 队列已排空，第二个 device 不再收到补投
     const dev2 = new FakeConn("device");
@@ -127,14 +127,20 @@ describe("离线队列", () => {
 });
 
 describe("连接约束", () => {
-  it("每 channel 仅一个 host，后者被 4001 拒绝", () => {
+  it("每 channel 仅一个 host：新 host 接管，旧连接以 4001 关闭且不再收帧", () => {
     const core = new RelayCore();
     const h1 = new FakeConn("host");
     const h2 = new FakeConn("host");
     expect(core.connect(CID, "host", h1).ok).toBe(true);
-    const res = core.connect(CID, "host", h2);
-    expect(res).toEqual({ ok: false, reason: "host_exists" });
-    expect(h2.closedWith).toBe(4001);
+    expect(core.connect(CID, "host", h2).ok).toBe(true);
+    expect(h1.closedWith).toBe(4001);
+    // 旧连接随后触发的 disconnect 不得把新 host 清掉
+    core.disconnect(CID, h1);
+    const dev = new FakeConn("device");
+    core.connect(CID, "device", dev);
+    core.message(CID, dev, "to-new-host");
+    expect(h2.frames()).toEqual(["to-new-host"]);
+    expect(h1.frames()).toEqual([]);
   });
 
   it("非法 channelId 拒绝连接", () => {
@@ -164,21 +170,30 @@ describe("连接约束", () => {
 });
 
 describe("限流与帧大小", () => {
-  it("超过每 channel 每秒帧数上限：回 rate_limited，丢弃且不踢连接", () => {
-    const core = new RelayCore({ ratePerSec: 2 });
+  it("限流按连接：超限设备收 rate_limited 且不被踢，其他设备与 host 不受影响", () => {
+    const core = new RelayCore({ ratePerSec: 2, maxDevices: 4 });
     const host = new FakeConn("host");
-    const dev = new FakeConn("device");
+    const dev = new FakeConn("device", "a");
+    const other = new FakeConn("device", "b");
     core.connect(CID, "host", host);
-    core.connect(CID, "device", dev);
+    core.connect(CID, "device", dev, { deviceId: "a" });
+    core.connect(CID, "device", other, { deviceId: "b" });
 
     core.message(CID, dev, "f1");
     core.message(CID, dev, "f2");
     core.message(CID, dev, "f3"); // 超限
     expect(host.frames()).toEqual(["f1", "f2"]);
     expect(dev.errors()).toEqual(["rate_limited"]);
-
-    // 连接保留，后续仍可通信（等令牌回补——这里用新 core 简化语义验证）
     expect(dev.closedWith).toBeUndefined();
+
+    // 另一台设备有自己的桶
+    core.message(CID, other, "g1");
+    expect(host.frames()).toEqual(["f1", "f2", "g1"]);
+    expect(other.errors()).toEqual([]);
+    // host 的桶 = ratePerSec × maxDevices，能承载全部设备流量
+    for (let i = 0; i < 8; i++) core.message(CID, host, `{"deviceId":"a","i":${i}}`);
+    expect(host.errors()).toEqual([]);
+    expect(dev.frames()).toHaveLength(8);
   });
 
   it("单帧超过 256KB：回 frame_too_large，不转发", () => {
