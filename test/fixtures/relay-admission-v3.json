@@ -1,0 +1,20 @@
+{
+  "desktopSk": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+  "desktopPk": "pOCSkrZRwni5dyxWn1+puxPZBrRqtoyd+dwrRAn4ogk=",
+  "relaySk": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+  "relayPk": "zo060cy2M+x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk=",
+  "channelId": "1a92f23852dc908d97316a3b13578281196c1dd73d9ae5e313f3fb6b8954bf55",
+  "hostProof": {
+    "ts": 1700000000000,
+    "proof": "95B+2usXmm7CnfRC7xqVdGN6p34/riZOI911KpE0hJU="
+  },
+  "deviceGrant": {
+    "subject": "phone-1",
+    "exp": 1700000600000,
+    "mac": "RcN6cuWo3Nc60RkvphHh8+v6ELhLnJ1cZkGV8+b3elY="
+  },
+  "pairGrant": {
+    "exp": 1700000600000,
+    "mac": "m1d8IasjMCzF7Wi1CNc5ZGAG/wzF/1ivRFl0h/nWJ3Q="
+  }
+}

@@ -38,6 +38,7 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
+    "tweetnacl": "1.0.3",
     "ws": "8.22.0"
   },
   "devDependencies": {
