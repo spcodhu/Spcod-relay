@@ -17,11 +17,14 @@ Usage:
   ./deploy.sh --domain relay.example.com --http-port 8080 --https-port 8443
                                       Use custom Caddy host ports
   ./deploy.sh --no-tls                Disable Caddy and expose relay directly
-  ./deploy.sh --anonymous             Run an official public relay without an access key
-  ./deploy.sh --access-key            Require an access key (default for self-hosting)
+  ./deploy.sh --public                Run a public relay without an access key (official instance)
+
+  Self-hosting requires an access key on top of v3 admission by default.
 
 Requires Git, Docker 24+, and the Docker Compose v2 plugin.
-Configuration and the generated access key are stored in deploy/relay.env.
+Configuration, the relay identity key (RELAY_SECRET_KEY) and the generated access key
+are stored in deploy/relay.env. Never rotate RELAY_SECRET_KEY casually: every device
+admission grant issued by paired desktops is bound to it.
 EOF
 }
 
@@ -79,12 +82,8 @@ while (($# > 0)); do
       mode="off"
       shift
       ;;
-    --anonymous)
-      auth_mode_override="anonymous"
-      shift
-      ;;
-    --access-key)
-      auth_mode_override="access-key"
+    --public)
+      auth_mode_override="public"
       shift
       ;;
     -h|--help)
@@ -162,21 +161,32 @@ generate_access_key() {
 }
 
 case "${auth_mode_override}" in
-  anonymous)
-    set_env RELAY_ALLOW_ANONYMOUS true
-    set_env ALLOW_LEGACY_WS true
-    ;;
-  access-key)
-    set_env RELAY_ALLOW_ANONYMOUS false
+  public)
+    set_env RELAY_PUBLIC true
+    set_env RELAY_ACCESS_KEY ""
     ;;
 esac
 
-allow_anonymous="$(get_env RELAY_ALLOW_ANONYMOUS)"
+# 协议 v3：relay 身份密钥是全部设备准入令牌的根，只生成一次并持久保存。
+relay_secret_key="$(get_env RELAY_SECRET_KEY)"
+if [[ -z "${relay_secret_key}" ]]; then
+  relay_secret_key="$(generate_access_key)"
+  set_env RELAY_SECRET_KEY "${relay_secret_key}"
+  log "Generated RELAY_SECRET_KEY (relay identity). Keep it: rotating it invalidates all device grants."
+fi
+
+relay_public="$(get_env RELAY_PUBLIC)"
+# 从 v2 匿名部署迁移：旧 relay.env 只有 RELAY_ALLOW_ANONYMOUS=true，等价于公共模式。
+if [[ -z "${relay_public}" && "$(get_env RELAY_ALLOW_ANONYMOUS)" == true ]]; then
+  relay_public=true
+  set_env RELAY_PUBLIC true
+  log "Migrated RELAY_ALLOW_ANONYMOUS=true to RELAY_PUBLIC=true (protocol v3)."
+fi
 access_key="$(get_env RELAY_ACCESS_KEY)"
-if [[ "${allow_anonymous}" == true ]]; then
-  # 保留旧密钥但由运行时明确忽略；不要把密钥打印到官方匿名模式的部署输出。
+if [[ "${relay_public}" == true ]]; then
   access_key=""
-  log "Anonymous mode is enabled; no relay access key is required."
+  set_env RELAY_ACCESS_KEY ""
+  log "Public mode: no access key; admission relies on v3 host proofs and device grants."
 elif [[ -z "${access_key}" || "${access_key}" == replace-with-* ]]; then
   access_key="$(generate_access_key)"
   set_env RELAY_ACCESS_KEY "${access_key}"
@@ -272,8 +282,8 @@ else
   pwa_url="http://<SERVER_IP>:${relay_port}/"
 fi
 
-if [[ "${allow_anonymous}" == true ]]; then
-  access_key_display="not required (anonymous mode)"
+if [[ "${relay_public}" == true ]]; then
+  access_key_display="not required (public mode)"
 else
   access_key_display="${access_key}"
 fi

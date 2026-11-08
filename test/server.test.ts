@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
+import { RelayIdentity } from "../src/admission.js";
 import { createRelayServer, loadConfig, type RelayConfig, type RelayServer } from "../src/index.js";
+import { type FakeDesktop, fakeDesktop } from "./helpers.js";
 
-const CID = "b".repeat(64);
+/** 每个 describe 一把固定 relay 身份，便于桌面侧预先算好证明 */
+const identity = RelayIdentity.generate();
 
 function config(overrides: Partial<RelayConfig> = {}): RelayConfig {
   return {
@@ -16,8 +19,45 @@ function config(overrides: Partial<RelayConfig> = {}): RelayConfig {
     queueTtlMs: 72 * 3600 * 1000,
     frameMaxBytes: 256 * 1024,
     ratePerSec: 60,
+    identity,
     ...overrides,
   };
+}
+
+async function postTicket(
+  base: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(`http://${base}/v1/tickets`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+async function ticketFor(base: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Promise<string> {
+  const res = await postTicket(base, body, headers);
+  if (res.status !== 200) throw new Error(`ticket ${res.status}`);
+  const grant = (await res.json()) as { ticket: string };
+  return encodeURIComponent(grant.ticket);
+}
+
+/** 以 host 身份完成 v3 准入并建连 */
+async function connectHost(base: string, desktop: FakeDesktop, accessKey?: string): Promise<TestClient> {
+  const ticket = await ticketFor(
+    base,
+    desktop.hostTicketBody(identity.publicKey),
+    accessKey ? { authorization: `Bearer ${accessKey}` } : {},
+  );
+  return connect(base, `/channel/${desktop.channelId}?role=host&ticket=${ticket}`);
+}
+
+/** 以 device 身份（可带 deviceId）凭桌面令牌建连 */
+async function connectDevice(base: string, desktop: FakeDesktop, deviceId?: string): Promise<TestClient> {
+  const ticket = await ticketFor(base, desktop.deviceTicketBody(identity.publicKey, deviceId));
+  const dev = deviceId ? `&device=${encodeURIComponent(deviceId)}` : "";
+  return connect(base, `/channel/${desktop.channelId}?role=device${dev}&ticket=${ticket}`);
 }
 
 async function start(cfg: RelayConfig): Promise<{ relay: RelayServer; base: string }> {
@@ -81,7 +121,7 @@ describe("HTTP 服务", () => {
     const res = await fetch(`http://${base}/health`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    expect(await res.json()).toEqual({ ok: true, version: 2 });
+    expect(await res.json()).toEqual({ ok: true, version: 3 });
   });
 
   it("GET /health 为浏览器返回中英文健康页面", async () => {
@@ -104,7 +144,10 @@ describe("HTTP 服务", () => {
     const res = await fetch(`http://${base}/app.js`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("javascript");
-    expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
+    const csp = res.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toMatch(/script-src 'self';/);
+    expect(csp).not.toMatch(/script-src[^;]*unsafe-inline/);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await res.text()).toBe("console.log(1)");
   });
@@ -151,23 +194,31 @@ describe("无静态目录时", () => {
   });
 });
 
-describe("认证部署配置", () => {
-  it("默认保留自托管访问密钥与 ALLOW_LEGACY_WS 行为", () => {
-    const cfg = loadConfig({ RELAY_ACCESS_KEY: " secret ", ALLOW_LEGACY_WS: "false" });
-    expect(cfg.allowAnonymous).toBe(false);
+describe("部署配置", () => {
+  it("访问密钥可选叠加；relay 身份来自 RELAY_SECRET_KEY；per-IP 上限可配", () => {
+    const secret = Buffer.alloc(32, 9).toString("base64");
+    const cfg = loadConfig({ RELAY_ACCESS_KEY: " secret ", RELAY_SECRET_KEY: secret, MAX_CONNS_PER_IP: "5" });
     expect(cfg.accessKey).toBe("secret");
-    expect(cfg.allowLegacyWs).toBe(false);
+    expect(cfg.identity?.publicKey).toBe(RelayIdentity.fromSecretKey(secret).publicKey);
+    expect(cfg.maxConnsPerIp).toBe(5);
+    const open = loadConfig({ RELAY_SECRET_KEY: secret });
+    expect(open.accessKey).toBeNull();
   });
+});
 
-  it("显式匿名模式忽略遗留密钥并兼容官方无 ticket 客户端", () => {
-    const cfg = loadConfig({
-      RELAY_ALLOW_ANONYMOUS: "true",
-      RELAY_ACCESS_KEY: "old-secret",
-      ALLOW_LEGACY_WS: "false",
-    });
-    expect(cfg.allowAnonymous).toBe(true);
-    expect(cfg.accessKey).toBeNull();
-    expect(cfg.allowLegacyWs).toBe(true);
+describe("relay-info", () => {
+  it("GET /v1/relay-info 返回协议版本与 relay 公钥，带 CORS", async () => {
+    const { relay, base } = await start(config({ corsAllowedOrigins: ["https://pwa.example"] }));
+    try {
+      const res = await fetch(`http://${base}/v1/relay-info`, { headers: { origin: "https://pwa.example" } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("access-control-allow-origin")).toBe("https://pwa.example");
+      expect(await res.json()).toEqual({ version: 3, relayPk: identity.publicKey });
+      const denied = await fetch(`http://${base}/v1/relay-info`, { headers: { origin: "https://evil.example" } });
+      expect(denied.status).toBe(403);
+    } finally {
+      await relay.close();
+    }
   });
 });
 
@@ -183,22 +234,26 @@ describe("WebSocket 协议", () => {
     await relay.close();
   });
 
-  it("非法 channelId / role 在升级阶段以 400 拒绝", async () => {
-    for (const url of ["/channel/not-hex?role=host", `/channel/${CID}?role=admin`, "/other/path?role=host"]) {
+  it("非法 channelId / role 在升级阶段以 400 拒绝；无票据 401", async () => {
+    const desktop = fakeDesktop();
+    for (const url of ["/channel/not-hex?role=host", `/channel/${desktop.channelId}?role=admin`, "/other/path?role=host"]) {
       await expect(connect(base, url)).rejects.toThrow(/400/);
     }
+    await expect(connect(base, `/channel/${desktop.channelId}?role=host`)).rejects.toThrow(/401/);
+    await expect(connect(base, `/channel/${desktop.channelId}?role=device`)).rejects.toThrow(/401/);
   });
 
   it("host↔device 全链路：hello 在前，业务帧原样送达", async () => {
-    const host = await connect(base, `/channel/${CID}?role=host`);
+    const desktop = fakeDesktop();
+    const host = await connectHost(base, desktop);
     const helloHost = JSON.parse(await host.next());
-    expect(helloHost).toEqual({ t: "relay.hello", role: "host", queued: 0, version: 2 });
+    expect(helloHost).toEqual({ t: "relay.hello", role: "host", queued: 0, version: 3 });
 
-    const dev = await connect(base, `/channel/${CID}?role=device`);
+    const dev = await connectDevice(base, desktop, "phone");
     const helloDev = JSON.parse(await dev.next());
-    expect(helloDev).toEqual({ t: "relay.hello", role: "device", queued: 0, version: 2 });
+    expect(helloDev).toEqual({ t: "relay.hello", role: "device", queued: 0, version: 3 });
 
-    const frame = JSON.stringify({ id: "x", seq: 1, t: "encrypted", c: "AA==" });
+    const frame = JSON.stringify({ id: "x", seq: 1, t: "encrypted", c: "AA==", deviceId: "phone" });
     const got = dev.next();
     host.ws.send(frame);
     expect(await got).toBe(frame);
@@ -212,75 +267,80 @@ describe("WebSocket 协议", () => {
     await Promise.all([host.closed, dev.closed]);
   });
 
-  it("第二个 host 被 close code 4001 拒绝", async () => {
-    const cid = "c".repeat(64);
-    const h1 = await connect(base, `/channel/${cid}?role=host`);
+  it("第二个 host（同一桌面身份）接管 channel：旧连接收 4001，新连接收 hello 与补投", async () => {
+    const desktop = fakeDesktop();
+    const dev = await connectDevice(base, desktop, "phone");
+    await dev.next(); // hello
+    const h1 = await connectHost(base, desktop);
     await h1.next(); // hello
 
-    const h2 = await connect(base, `/channel/${cid}?role=host`);
-    expect(await h2.closed).toBe(4001);
-    expect(h1.ws.readyState).toBe(WebSocket.OPEN); // 旧 host 不受影响
-    h1.ws.close();
-    await h1.closed;
+    const h2 = await connectHost(base, desktop);
+    expect(await h1.closed).toBe(4001);
+    expect(JSON.parse(await h2.next())).toMatchObject({ t: "relay.hello", role: "host" });
+    // 新 host 正常收发
+    const toHost = h2.next();
+    dev.ws.send('{"t":"auth","deviceId":"phone"}');
+    expect(await toHost).toBe('{"t":"auth","deviceId":"phone"}');
+    h2.ws.close();
+    dev.ws.close();
+    await Promise.all([h2.closed, dev.closed]);
   });
 
   it("离线消息经真实链路补投", async () => {
-    const cid = "d".repeat(64);
-    const dev = await connect(base, `/channel/${cid}?role=device`);
+    const desktop = fakeDesktop();
+    const dev = await connectDevice(base, desktop, "phone");
     await dev.next(); // hello
     dev.ws.send("offline-1");
     await new Promise((r) => setTimeout(r, 50));
 
-    const host = await connect(base, `/channel/${cid}?role=host`);
+    const host = await connectHost(base, desktop);
     const hello = JSON.parse(await host.next());
-    expect(hello).toEqual({ t: "relay.hello", role: "host", queued: 1, version: 2 });
+    expect(hello).toEqual({ t: "relay.hello", role: "host", queued: 1, version: 3 });
     expect(await host.next()).toBe("offline-1");
 
     host.ws.close();
     dev.ws.close();
     await Promise.all([host.closed, dev.closed]);
   });
+
+  it("票据单次有效：重放 401；错 channel 的票据 401", async () => {
+    const desktop = fakeDesktop();
+    const ticket = await ticketFor(base, desktop.deviceTicketBody(identity.publicKey, "phone"));
+    const dev = await connect(base, `/channel/${desktop.channelId}?role=device&device=phone&ticket=${ticket}`);
+    await dev.next();
+    dev.ws.close();
+    await dev.closed;
+    await expect(
+      connect(base, `/channel/${desktop.channelId}?role=device&device=phone&ticket=${ticket}`),
+    ).rejects.toThrow(/401/);
+    const other = fakeDesktop();
+    const t2 = await ticketFor(base, desktop.deviceTicketBody(identity.publicKey, "phone"));
+    await expect(connect(base, `/channel/${other.channelId}?role=device&device=phone&ticket=${t2}`)).rejects.toThrow(
+      /401/,
+    );
+  });
+
+  it("票据接口：伪造证明 401，形状错误 400", async () => {
+    const desktop = fakeDesktop();
+    const forged = { ...desktop.hostTicketBody(identity.publicKey), proof: Buffer.alloc(32, 1).toString("base64") };
+    expect((await postTicket(base, forged)).status).toBe(401);
+    expect((await postTicket(base, { channelId: desktop.channelId, role: "host" })).status).toBe(400);
+    const expired = desktop.deviceTicketBody(identity.publicKey, "phone", Date.now() - 1);
+    const res = await postTicket(base, expired);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "grant_expired" });
+  });
 });
 
 describe("票据与生产连接治理", () => {
-  it("访问密钥 → 单次 ticket 建连；无 ticket 与重放均拒绝", async () => {
+  it("自托管访问密钥叠加：无 Bearer 401；正确 Bearer + 证明放行", async () => {
     const { relay, base } = await start(config({ accessKey: "secret" }));
     try {
-      const body = JSON.stringify({ channelId: CID, role: "device", deviceId: "phone" });
-      const denied = await fetch(`http://${base}/v1/tickets`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      });
+      const desktop = fakeDesktop();
+      const denied = await postTicket(base, desktop.hostTicketBody(identity.publicKey));
       expect(denied.status).toBe(401);
-      const issued = await fetch(`http://${base}/v1/tickets`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: "Bearer secret" },
-        body,
-      });
-      expect(issued.status).toBe(200);
-      const grant = (await issued.json()) as { ticket: string; expiresAt: number };
-      expect(grant.ticket).toBeTruthy();
-      const dev = await connect(base, `/channel/${CID}?role=device&device=phone&ticket=${encodeURIComponent(grant.ticket)}`);
-      expect(JSON.parse(await dev.next())).toMatchObject({ t: "relay.hello", version: 2 });
-      dev.ws.close();
-      await dev.closed;
-      await expect(
-        connect(base, `/channel/${CID}?role=device&device=phone&ticket=${encodeURIComponent(grant.ticket)}`),
-      ).rejects.toThrow(/401/);
-      await expect(connect(base, `/channel/${CID}?role=device`)).rejects.toThrow(/401/);
-    } finally {
-      await relay.close();
-    }
-  });
-
-  it("官方匿名模式忽略残留旧密钥，无 ticket 也能完成 WS 握手", async () => {
-    const { relay, base } = await start(
-      config({ accessKey: "old-secret", allowAnonymous: true, allowLegacyWs: false }),
-    );
-    try {
-      const host = await connect(base, `/channel/${CID}?role=host`);
-      expect(JSON.parse(await host.next())).toMatchObject({ t: "relay.hello", role: "host", version: 2 });
+      const host = await connectHost(base, desktop, "secret");
+      expect(JSON.parse(await host.next())).toMatchObject({ t: "relay.hello", version: 3 });
       host.ws.close();
       await host.closed;
     } finally {
@@ -292,7 +352,10 @@ describe("票据与生产连接治理", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { relay, base } = await start(config({ accessKey: "server-secret" }));
     try {
-      await expect(connect(base, `/channel/${CID}?role=device&ticket=client-ticket-secret`)).rejects.toThrow(/401/);
+      const desktop = fakeDesktop();
+      await expect(connect(base, `/channel/${desktop.channelId}?role=device&ticket=client-ticket-secret`)).rejects.toThrow(
+        /401/,
+      );
       const output = warn.mock.calls
         .map((call) => call.map((value) => (typeof value === "string" ? value : JSON.stringify(value))).join(" "))
         .join("\n");
@@ -307,12 +370,65 @@ describe("票据与生产连接治理", () => {
     }
   });
 
+  it("per-IP 连接上限：第 N+1 条以 429 拒绝，断开后恢复", async () => {
+    const { relay, base } = await start(config({ maxConnsPerIp: 2 }));
+    try {
+      const desktop = fakeDesktop();
+      const a = await connectDevice(base, desktop, "a");
+      const b = await connectDevice(base, desktop, "b");
+      await Promise.all([a.next(), b.next()]);
+      await expect(connectDevice(base, desktop, "c")).rejects.toThrow(/429/);
+      a.ws.close();
+      await a.closed;
+      await new Promise((r) => setTimeout(r, 20));
+      const c = await connectDevice(base, desktop, "c");
+      await c.next();
+      b.ws.close();
+      c.ws.close();
+      await Promise.all([b.closed, c.closed]);
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it("限流按连接：一台设备刷爆不影响另一台与 host", async () => {
+    const { relay, base } = await start(config({ ratePerSec: 2 }));
+    try {
+      const desktop = fakeDesktop();
+      const host = await connectHost(base, desktop);
+      await host.next();
+      const noisy = await connectDevice(base, desktop, "noisy");
+      await noisy.next();
+      const quiet = await connectDevice(base, desktop, "quiet");
+      await quiet.next();
+      for (let i = 0; i < 5; i++) noisy.ws.send(`n${i}`);
+      // 被限流的设备收到 relay.error，host 只收到前 2 帧
+      let limited = false;
+      for (let i = 0; i < 3; i++) {
+        if (JSON.parse(await noisy.next()).error === "rate_limited") limited = true;
+      }
+      expect(limited).toBe(true);
+      expect(await host.next()).toBe("n0");
+      expect(await host.next()).toBe("n1");
+      const fromQuiet = host.next();
+      quiet.ws.send("q0");
+      expect(await fromQuiet).toBe("q0");
+      host.ws.close();
+      noisy.ws.close();
+      quiet.ws.close();
+      await Promise.all([host.closed, noisy.closed, quiet.closed]);
+    } finally {
+      await relay.close();
+    }
+  });
+
   it("ping/pong 保持活跃连接", async () => {
     const { relay, base } = await start(config({ heartbeatMs: 20 }));
     try {
-      const host = await connect(base, `/channel/${CID}?role=host`);
+      const desktop = fakeDesktop();
+      const host = await connectHost(base, desktop);
       await host.next();
-      const dev = await connect(base, `/channel/${CID}?role=device`);
+      const dev = await connectDevice(base, desktop, "phone");
       await dev.next();
       await new Promise((resolve) => setTimeout(resolve, 70));
       expect(dev.ws.readyState).toBe(WebSocket.OPEN);

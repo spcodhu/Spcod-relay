@@ -3,12 +3,13 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
+import { RelayIdentity } from "./admission.js";
 import { CHANNEL_ID_RE, type Conn, RelayCore, type Role } from "./channel.js";
-import { RELAY_PROTOCOL_VERSION, RELAY_TICKET_PATH } from "./protocol.js";
+import { RELAY_INFO_PATH, RELAY_PROTOCOL_VERSION, RELAY_TICKET_PATH } from "./protocol.js";
 import { parseTicketBody } from "./ticket-request.js";
 import { TicketService } from "./tickets.js";
 
-/** 日志纪律：只记录元数据，绝不记录帧、ticket、访问密钥或查询字符串。 */
+/** 日志纪律：只记录元数据，绝不记录帧、ticket、访问密钥、准入证明或查询字符串。 */
 export interface RelayConfig {
   port: number;
   staticDir: string;
@@ -19,17 +20,17 @@ export interface RelayConfig {
   maxChannels: number;
   maxDevices: number;
   queueBytesMax: number;
-  /** 自托管可选共享访问密钥；缺省为官方匿名票据模式。 */
+  /** relay X25519 身份（协议 v3 准入根）；缺省由 RelayIdentity.fromEnv 决定 */
+  identity?: RelayIdentity;
+  /** 自托管可选共享访问密钥：叠加在准入证明之上的 Bearer 门槛；官方公共实例为空。 */
   accessKey?: string | null;
-  /** 迁移期兼容无 ticket 客户端；配置访问密钥时始终强制票据。 */
-  allowLegacyWs?: boolean;
-  /** 官方实例显式匿名模式：忽略遗留访问密钥并允许无 ticket WebSocket。 */
-  allowAnonymous?: boolean;
   /** 除 same-origin 外，允许调用票据 API/WS 的 PWA origins。 */
   corsAllowedOrigins?: string[];
   heartbeatMs?: number;
   maxBufferedBytes?: number;
   ticketRatePerMin?: number;
+  /** 单 IP 同时持有的 WebSocket 连接上限（默认 64；前置反代时必须开 TRUST_PROXY，否则全站同 IP） */
+  maxConnsPerIp?: number;
   trustProxy?: boolean;
 }
 
@@ -39,7 +40,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
   };
   const bool = (v: string | undefined, dflt: boolean): boolean => (v == null ? dflt : v === "true");
-  const allowAnonymous = bool(env.RELAY_ALLOW_ANONYMOUS, false);
   return {
     port: int(env.PORT, 8787),
     staticDir: env.STATIC_DIR ?? "./public",
@@ -50,9 +50,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     maxChannels: int(env.MAX_CHANNELS, 1024),
     maxDevices: int(env.MAX_DEVICES_PER_CHANNEL, 16),
     queueBytesMax: int(env.QUEUE_BYTES_MAX_MB, 32) * 1024 * 1024,
-    accessKey: allowAnonymous ? null : env.RELAY_ACCESS_KEY?.trim() || null,
-    allowLegacyWs: allowAnonymous || bool(env.ALLOW_LEGACY_WS, true),
-    allowAnonymous,
+    identity: RelayIdentity.fromEnv(env),
+    accessKey: env.RELAY_ACCESS_KEY?.trim() || null,
     corsAllowedOrigins: (env.CORS_ALLOWED_ORIGINS ?? "")
       .split(",")
       .map((origin) => origin.trim())
@@ -60,6 +59,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     heartbeatMs: int(env.HEARTBEAT_MS, 30_000),
     maxBufferedBytes: int(env.MAX_BUFFERED_BYTES, 1024 * 1024),
     ticketRatePerMin: int(env.TICKET_RATE_PER_MIN, 60),
+    maxConnsPerIp: int(env.MAX_CONNS_PER_IP, 64),
     trustProxy: bool(env.TRUST_PROXY, false),
   };
 }
@@ -90,8 +90,10 @@ const MIME: Record<string, string> = {
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
+  // script-src 不含 'unsafe-inline'：PWA 的首屏主题脚本已外置为 theme-boot.js；
+  // style-src 保留 'unsafe-inline'（React 内联 style 属性与代码高亮依赖）。
   "content-security-policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
@@ -187,7 +189,7 @@ function corsHeaders(origin: string | undefined): Record<string, string> {
     ? {
         "access-control-allow-origin": origin,
         "access-control-allow-headers": "authorization,content-type",
-        "access-control-allow-methods": "POST,OPTIONS",
+        "access-control-allow-methods": "GET,POST,OPTIONS",
         vary: "Origin",
       }
     : {};
@@ -229,15 +231,16 @@ export function createRelayServer(config: RelayConfig): RelayServer {
   const staticDir = path.resolve(config.staticDir);
   const hasStatic = existsSync(staticDir) && statSync(staticDir).isDirectory();
   const allowedOrigins = config.corsAllowedOrigins ?? [];
-  // 匿名模式是显式部署决策：即使 relay.env 残留旧密钥，也不能让官方客户端再次被 401。
-  const allowAnonymous = config.allowAnonymous ?? false;
-  const accessKey = allowAnonymous ? null : config.accessKey;
-  const tickets = new TicketService(accessKey ?? null);
-  const allowLegacyWs = allowAnonymous || (config.allowLegacyWs ?? true);
+  const identity = config.identity ?? RelayIdentity.fromEnv();
+  const accessKey = config.accessKey ?? null;
+  const tickets = new TicketService(identity, accessKey);
   const heartbeatMs = config.heartbeatMs ?? 30_000;
   const maxBufferedBytes = config.maxBufferedBytes ?? 1024 * 1024;
   const ticketRatePerMin = config.ticketRatePerMin ?? 60;
+  const maxConnsPerIp = config.maxConnsPerIp ?? 64;
   const ticketAttempts = new Map<string, { count: number; resetAt: number }>();
+  /** 每 IP 当前持有的 WebSocket 连接数（attach +1 / close -1） */
+  const connsPerIp = new Map<string, number>();
 
   function requestIp(req: http.IncomingMessage): string {
     if (config.trustProxy) {
@@ -260,6 +263,19 @@ export function createRelayServer(config: RelayConfig): RelayServer {
     return true;
   }
 
+  function acquireConnSlot(ip: string): boolean {
+    const current = connsPerIp.get(ip) ?? 0;
+    if (current >= maxConnsPerIp) return false;
+    connsPerIp.set(ip, current + 1);
+    return true;
+  }
+
+  function releaseConnSlot(ip: string): void {
+    const current = connsPerIp.get(ip) ?? 0;
+    if (current <= 1) connsPerIp.delete(ip);
+    else connsPerIp.set(ip, current - 1);
+  }
+
   async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
@@ -270,6 +286,21 @@ export function createRelayServer(config: RelayConfig): RelayServer {
         if (acceptsHtml) html(res, 200, healthPage(req.headers["accept-language"]));
         else json(res, 200, { ok: true, version: RELAY_PROTOCOL_VERSION });
         return;
+      }
+      if (url.pathname === RELAY_INFO_PATH && (req.method === "GET" || req.method === "OPTIONS")) {
+        const origin = req.headers.origin;
+        if (!originAllowed(origin, req.headers.host, allowedOrigins)) return json(res, 403, { error: "origin_denied" });
+        if (req.method === "OPTIONS") {
+          res.writeHead(204, { ...SECURITY_HEADERS, ...corsHeaders(origin) });
+          res.end();
+          return;
+        }
+        return json(
+          res,
+          200,
+          { version: RELAY_PROTOCOL_VERSION, relayPk: identity.publicKey },
+          { "cache-control": "no-store", ...corsHeaders(origin) },
+        );
       }
       if (url.pathname === RELAY_TICKET_PATH && req.method === "OPTIONS") {
         const origin = req.headers.origin;
@@ -283,10 +314,13 @@ export function createRelayServer(config: RelayConfig): RelayServer {
         if (!originAllowed(origin, req.headers.host, allowedOrigins)) return json(res, 403, { error: "origin_denied" });
         if (!ticketRateAllowed(requestIp(req))) return json(res, 429, { error: "rate_limited" }, corsHeaders(origin));
         try {
-          const binding = parseTicketBody(await readJson(req));
-          if (!binding) return json(res, 400, { error: "bad_request" }, corsHeaders(origin));
-          const result = tickets.issue(binding, req.headers.authorization);
-          if (!result.ok) return json(res, 401, { error: result.error }, corsHeaders(origin));
+          const body = parseTicketBody(await readJson(req));
+          if (!body) return json(res, 400, { error: "bad_request" }, corsHeaders(origin));
+          const result = tickets.issue(body, req.headers.authorization);
+          if (!result.ok) {
+            const status = result.error === "bad_request" ? 400 : 401;
+            return json(res, status, { error: result.error }, corsHeaders(origin));
+          }
           return json(res, 200, result.grant, corsHeaders(origin));
         } catch {
           return json(res, 400, { error: "bad_request" }, corsHeaders(origin));
@@ -351,10 +385,15 @@ export function createRelayServer(config: RelayConfig): RelayServer {
       if (!CHANNEL_ID_RE.test(channelId)) return reject(400, "Bad Request", "invalid_channel");
       if (role !== "host" && role !== "device") return reject(400, "Bad Request", "invalid_role");
       const binding = { channelId, role: role as Role, ...(safeDeviceId ? { deviceId: safeDeviceId } : {}) };
+      // 协议 v3：票据无条件必需（票据签发时已完成 host 证明 / 设备令牌验证）
       const ticket = url.searchParams.get("ticket") ?? "";
-      const ticketAccepted = ticket && tickets.consume(ticket, binding);
-      if ((accessKey || !allowLegacyWs) && !ticketAccepted) return reject(401, "Unauthorized", "ticket_required");
-      wss.handleUpgrade(req, socket, head, (ws) => attach(channelId, role as Role, ws, safeDeviceId));
+      if (!ticket || !tickets.consume(ticket, binding)) return reject(401, "Unauthorized", "ticket_required");
+      const ip = requestIp(req);
+      if (!acquireConnSlot(ip)) return reject(429, "Too Many Requests", "too_many_connections");
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.once("close", () => releaseConnSlot(ip));
+        attach(channelId, role as Role, ws, safeDeviceId);
+      });
     } catch {
       socket.destroy();
     }
@@ -384,6 +423,7 @@ export function createRelayServer(config: RelayConfig): RelayServer {
 
   const sweeper = setInterval(() => {
     core.sweep();
+    tickets.sweep();
     const now = Date.now();
     for (const [ip, value] of ticketAttempts) if (value.resetAt <= now) ticketAttempts.delete(ip);
   }, 60_000);
@@ -418,8 +458,10 @@ if (isMain) {
   const config = loadConfig();
   const { server, close } = createRelayServer(config);
   server.listen(config.port, () => {
-    const authMode = config.allowAnonymous || !config.accessKey ? "anonymous" : "access-key";
-    console.log(`[relay] listening on :${config.port} static=${path.resolve(config.staticDir)} auth=${authMode}`);
+    const accessMode = config.accessKey ? "on" : "off";
+    console.log(
+      `[relay] listening on :${config.port} static=${path.resolve(config.staticDir)} admission=v3 accessKey=${accessMode}`,
+    );
   });
   const shutdown = () => {
     void close().then(() => process.exit(0));
