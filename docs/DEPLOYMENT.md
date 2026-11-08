@@ -75,29 +75,33 @@ cd Spcod-relay
 
 1. 检查 Git、Docker 与 Compose；
 2. 首次运行时创建 `deploy/relay.env`，权限设为仅当前用户可读写；
-3. 默认进入自托管访问密钥模式，自动生成 32 字节随机 `RELAY_ACCESS_KEY`；
+3. 首次生成并持久化 32 字节随机 `RELAY_SECRET_KEY` 作为 relay 身份密钥；自托管默认再生成随机 `RELAY_ACCESS_KEY`；
 4. 构建包含 relay 与手机 PWA 的 `spcod-relay:local` 镜像；PWA 从固定提交的 Spcod 源码在 Docker 内构建，无需上传文件；
 5. 启动 relay 并等待 `/health` 健康检查通过；
 6. 输出 harness 所需的 Relay 地址和访问密钥。
 
-### 官方公共实例：显式匿名模式
+`RELAY_SECRET_KEY` 必须由 `deploy.sh` 生成并保存在 `deploy/relay.env`，生产环境缺失时会直接退出。该密钥是 v3 设备 grant 的验证根；换钥会使全部已签发设备 grant 失效，手机需在局域网重连续期或重新扫码。普通更新会保留原密钥。
 
-只有官方公共中继维护者使用匿名模式；普通自托管部署不要开启。官方客户端不携带访问密钥，因此官方实例应执行：
+### 官方公共实例：`--public`
+
+只有官方公共中继维护者使用公共模式；普通自托管部署不要添加该参数。官方实例执行：
 
 ```bash
-./deploy.sh --domain spcod-relay.hlt.cab --anonymous
+./deploy.sh --domain spcod-relay.hlt.cab --public
 ```
 
-该参数会把 `RELAY_ALLOW_ANONYMOUS=true` 持久写入 `deploy/relay.env`，后续 `git pull && ./deploy.sh` 仍保持匿名，不会重新生成并强制使用旧密钥。匿名模式不需要、也不会输出访问密钥；恢复自托管准入保护时运行 `./deploy.sh --access-key`。
+该参数会把 `RELAY_PUBLIC=true` 持久写入 `deploy/relay.env` 并清空 `RELAY_ACCESS_KEY`，后续 `git pull && ./deploy.sh` 仍保持公共模式。公共模式不要求 accessKey，但不会绕过 v3 准入：host 必须证明 channel 所有权，device 必须持桌面签发的 grant，WebSocket 仍须使用 30 秒单次 ticket。自托管默认在 v3 准入之上叠加 accessKey。
 
-匿名只关闭 relay 的接入密钥要求，不改变 channel 校验、origin 限制、限流或手机与桌面之间的端到端加密。relay 启动日志会显示 `auth=anonymous` 或 `auth=access-key`；WebSocket 握手拒绝日志只记录状态、原因、role 和 channelId，不记录 ticket、密钥或查询字符串。
+如需恢复自托管默认配置，将 `RELAY_PUBLIC=false` 写入 `deploy/relay.env` 后运行 `./deploy.sh`；accessKey 为空时脚本会自动生成新值。
+
+启动日志显示 `admission=v3 accessKey=on` 或 `admission=v3 accessKey=off`；WebSocket 握手拒绝日志只记录状态、原因、role 和 channelId，不记录 ticket、密钥、准入证明或查询字符串。
 
 部署后可以手工验证：
 
 ```bash
 # JSON 健康检查，适合命令行和监控
 curl --fail http://127.0.0.1:8787/health
-# {"ok":true,"version":2}
+# {"ok":true,"version":3}
 
 # 检查容器状态
 docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml ps
@@ -114,7 +118,7 @@ docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml ps
 | Relay 地址 | `ws://<服务器IP>:8787` |
 | 访问密钥 | 部署脚本输出的 `Access key` |
 
-保存后测试连接。手机端使用同一个 relay 地址和密钥；包含访问密钥的配对二维码不要分享。
+保存后测试连接。手机端使用同一个 relay 地址和密钥；包含访问密钥的配对二维码不要分享。accessKey 只是叠加的 Bearer 门槛，不能替代 host proof 或桌面签发的 device grant。
 
 无域名模式使用 HTTP/WebSocket。业务消息始终端到端加密，但长期公网服务仍建议使用下文的 HTTPS/WSS，保护连接元数据与票据交换。
 
@@ -131,14 +135,16 @@ docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml ps
 - 将 `DOMAIN` 写入 `deploy/relay.env`；
 - 启动 Caddy 2，申请并续期 Let's Encrypt/ZeroSSL 证书；
 - 将 relay 的宿主机端口绑定到 `127.0.0.1`；
-- 通过 Caddy 转发 HTTP 与 WebSocket；
+- 通过 Caddy 转发 HTTP 与 WebSocket，并设置 `TRUST_PROXY=true` 以按真实客户端 IP 执行限额；
 - 将证书和 Caddy 配置保存到 Docker 数据卷。
+
+`MAX_CONNS_PER_IP` 默认限制每 IP 64 条并发 WebSocket。使用其他前置反代时，必须设置可信的 `X-Forwarded-For` 和 `TRUST_PROXY=true`，否则所有访客会共享代理 IP 的限额；配置方法见[自托管指南](SELF_HOSTING.md#使用其他反向代理)。
 
 验证：
 
 ```bash
 curl --fail https://relay.example.com/health
-# {"ok":true,"version":2}
+# {"ok":true,"version":3}
 ```
 
 最后将 harness 的 Relay 地址改为 `wss://relay.example.com`。访问密钥无需改变。
@@ -210,9 +216,9 @@ sudo apt install -y docker-buildx-plugin
 
 保留构建缓存很重要：正常执行 `git pull && ./deploy.sh` 会复用缓存；`docker system prune`、`docker builder prune`、`docker compose build --no-cache` 会删除缓存并导致重新下载。只有缓存损坏或排查构建问题时才使用 `--no-cache`。
 
-主要配置文件是 `deploy/relay.env`。它包含访问密钥，已被 `.gitignore` 排除，不要提交或公开。
+主要配置文件是 `deploy/relay.env`。它包含 relay 身份密钥和访问密钥，已被 `.gitignore` 排除，不要提交或公开。
 
-修改配置后，重新运行 `./deploy.sh` 即可重建并重启。脚本会读取已保存的域名和认证模式，因此更新时不必重复传入 `--domain`、`--anonymous` 或 `--access-key`：
+修改配置后，重新运行 `./deploy.sh` 即可重建并重启。脚本会读取已保存的域名、密钥和公共模式，因此更新时不必重复传入 `--domain` 或 `--public`：
 
 ```bash
 git pull
@@ -249,7 +255,7 @@ docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml restart 
 docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls down
 ```
 
-离线消息队列只在内存中。重启或更新后客户端需要重连，不要把 relay 队列当作持久化数据库。
+离线消息队列只在内存中，默认最多保留 72 小时的密文与相关元数据。重启或更新后客户端需要重连，不要把 relay 队列当作持久化数据库。
 
 ## 7. PWA 与跨域配置
 
@@ -258,7 +264,7 @@ Docker 镜像已内置手机 PWA，无需手工构建、上传或配置 volume�
 - 无域名：`http://<服务器IP>:8787/`
 - 域名与 HTTPS：`https://relay.example.com/`
 
-后续 `git pull && ./deploy.sh` 会同时更新 relay 与 PWA。PWA 源码提交由 `Dockerfile` 的 `SPCOD_PWA_REF` 固定，维护者升级该提交后推送仓库即可。
+后续 `git pull && ./deploy.sh` 会同时更新 relay 与 PWA。PWA 源码提交由 `Dockerfile` 的 `SPCOD_PWA_REF` 固定，维护者升级该提交后推送仓库即可。relay 同源分发 PWA 时也是代码分发源，E2E 不能替代对该源的信任；自托管可同时控制 relay 与 PWA 构建。响应 CSP 使用 `script-src 'self'`，主题启动脚本已外置为 `theme-boot.js`。
 
 如果手机端 PWA 与 relay 使用同一个域名和端口，无需额外配置 CORS。若使用其他域名下的官方或自托管 PWA，在 `deploy/relay.env` 中设置完整 origin，多个值用英文逗号分隔：
 
@@ -276,6 +282,8 @@ CORS_ALLOWED_ORIGINS=https://app.example.com,https://another.example.com
 - **WSS 连接失败**：先检查 `https://域名/health`，再检查 DNS、80/443 和 Caddy 日志。
 - **手机 PWA 返回 `origin_denied`**：把 PWA 的完整 origin 加入 `CORS_ALLOWED_ORIGINS`。
 - **密钥遗失**：在服务器上查看 `deploy/relay.env` 的 `RELAY_ACCESS_KEY`，然后重新填写到客户端。
+- **生产环境提示缺少 `RELAY_SECRET_KEY`**：运行 `./deploy.sh` 生成并持久化身份密钥，不要手工改为临时密钥。
+- **更换 relay 身份密钥后设备无法连接**：原设备 grant 已失效；在局域网重连续期或重新扫码。
 - **部署健康检查失败**：运行 Compose 的 `logs --tail=100 relay` 查看日志。
 - **PWA 构建阶段失败**：确认服务器能访问 GitHub，并检查 Dockerfile 中固定的 Spcod 提交是否存在；无需改为本机上传文件。
 

@@ -47,7 +47,9 @@ cd Spcod-relay
 ./deploy.sh
 ```
 
-脚本会自动完成：生成本地配置文件和随机访问密钥、构建**同时包含 relay 与手机 PWA** 的镜像、启动服务并等待健康检查。PWA 在 Docker 构建阶段从固定提交的 Spcod 源码生成，无需安装 Node.js、pnpm，也无需上传文件或手工编辑 Compose。
+脚本会自动完成：生成并持久化 relay 身份密钥 `RELAY_SECRET_KEY` 和自托管随机访问密钥、构建**同时包含 relay 与手机 PWA** 的镜像、启动服务并等待健康检查。PWA 在 Docker 构建阶段从固定提交的 Spcod 源码生成，无需安装 Node.js、pnpm，也无需上传文件或手工编辑 Compose。
+
+`RELAY_SECRET_KEY` 必须由 `deploy.sh` 生成并保存在 `deploy/relay.env`；生产环境缺失该密钥会拒绝启动。不要随意换钥：换钥会使已签发的设备 grant 全部失效，设备需在局域网重连续期或重新扫码。
 
 部署完成后，终端会显示 Relay 地址和访问密钥。在 **Spcod harness → 设置 → 远程控制 → 自托管**中填写：
 
@@ -56,12 +58,12 @@ cd Spcod-relay
 
 配置与密钥保存在 `deploy/relay.env`，该文件已被 Git 忽略。直接暴露的 HTTP/WebSocket 适合临时或内网使用；长期公网部署建议按下一步启用域名和 HTTPS。
 
-官方公共实例由维护者使用 `./deploy.sh --domain spcod-relay.hlt.cab --anonymous` 部署。该模式持久保存且无需访问密钥；普通自托管不要开启，恢复准入保护使用 `--access-key`。
+官方公共实例由维护者使用 `./deploy.sh --domain spcod-relay.hlt.cab --public` 部署。`--public` 会持久保存公共模式且不配置 accessKey，但 host 仍须提交 v3 所有权证明，device 仍须持桌面签发的 grant；普通自托管部署默认生成并要求 accessKey。
 
 ## 验证安装与部署
 
 - **浏览器健康页**：打开 `http://<服务器IP>:8787/health`；配置域名后打开 `https://relay.example.com/health`。页面会根据浏览器语言显示中文或英文，只包含运行状态、协议版本和检查时间，不包含密钥或消息数据。
-- **命令行与自动化**：运行 `curl --fail http://<服务器IP>:8787/health`，配置域名后替换为 `https://relay.example.com/health`。成功时返回 `{"ok":true,"version":2}`。
+- **命令行与自动化**：运行 `curl --fail http://<服务器IP>:8787/health`，配置域名后替换为 `https://relay.example.com/health`。成功时返回 `{"ok":true,"version":3}`。
 - **容器状态**：运行 `docker compose --env-file deploy/relay.env -f deploy/docker-compose.yml --profile tls ps`，确认 relay 为 `healthy`；启用域名后 Caddy 应为 `running`。
 
 `/health` 会按请求头的 `Accept` 自动区分浏览器 HTML 与 JSON，无需维护两个检查地址。
@@ -77,7 +79,7 @@ cd Spcod-relay
 ./deploy.sh --domain relay.example.com
 ```
 
-脚本会启动 Caddy，自动申请和续期 TLS 证书，将 relay 收回本机回环地址，并通过反向代理转发 WebSocket。证书保存在 Docker 数据卷中。
+脚本会启动 Caddy，自动申请和续期 TLS 证书，将 relay 收回本机回环地址，通过反向代理转发 WebSocket，并设置 `TRUST_PROXY=true`。证书保存在 Docker 数据卷中。使用其他前置反代时必须传递真实的 `X-Forwarded-For` 并启用 `TRUST_PROXY`，否则 `MAX_CONNS_PER_IP`（默认 64）会按代理地址统一计数。
 
 随后把 harness 中的 Relay 地址改为 `wss://relay.example.com`，访问密钥不变。完整教程见[部署指南](docs/DEPLOYMENT.md)。
 
@@ -100,6 +102,7 @@ cd Spcod-relay
 | 一键部署 | Bash、Git、Docker Engine 24.0+、Docker Buildx、Docker Compose 2.20+（`docker compose`） |
 | 域名与证书 | Caddy 2（由 Compose 自动运行，无需单独安装） |
 | 本地开发 | Node.js 22.19+、pnpm 9.15.9 |
+| relay 运行时 | `ws`、`tweetnacl`（用于 v3 X25519 准入验证） |
 
 Docker 镜像使用 Node.js 22 Alpine，并在构建阶段锁定 pnpm 9.15.9。部署脚本会检查 Docker 与 Compose 是否可用。
 
@@ -142,17 +145,17 @@ pnpm start
 
 ```bash
 curl http://127.0.0.1:8787/health
-# {"ok":true,"version":2}
+# {"ok":true,"version":3}
 ```
 
 ## 工作原理
 
 1. **按 channel 路由密文**：channel 标识是桌面端公钥的 SHA-256 哈希，业务帧原样转发。
-2. **离线消息队列**：对方不在线时按 channel 分方向缓存密文，上线后按序补投；队列仅在内存中，重启后由客户端重连恢复。
+2. **离线消息队列**：对方不在线时按 channel 分方向缓存密文，上线后按序补投；默认最多保留 72 小时，队列仅在内存中，重启后由客户端重连恢复。
 3. **内置手机 PWA**：Docker 构建阶段从固定提交的 Spcod 源码构建 PWA，并放入最终镜像的 `/app/public`；relay 与配对页通过同一入口提供。
-4. **准入保护**：自托管实例默认生成访问密钥；客户端用长期密钥换取 30 秒单次 ticket，再通过 WebSocket 连接。
+4. **v3 准入**：host 凭基于 X25519 的 NaCl 预计算共享密钥生成 HMAC-SHA256 proof 取票，device 凭桌面签发的 grant 取票；ticket 30 秒内单次有效。自托管默认在此基础上叠加 accessKey，公共模式也不跳过 v3 验证。
 
-relay 没有账号体系，不记录消息明文，也不把离线队列持久化到磁盘。
+relay 没有账号体系，不记录消息明文，也不把离线队列持久化到磁盘。relay 同源分发 PWA 时也是代码分发源，E2E 不能替代对该源的信任；自托管可同时控制 relay 与 PWA 构建。响应 CSP 使用 `script-src 'self'`，PWA 主题启动脚本已外置。
 
 ## 常用运维命令
 

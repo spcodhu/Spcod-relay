@@ -13,7 +13,7 @@ RUN --mount=type=cache,id=spcod-npm,target=/root/.npm \
 
 FROM pnpm AS pwa
 ARG SPCOD_PWA_REPOSITORY=https://github.com/spcodhu/Spcode
-ARG SPCOD_PWA_REF=1e8f4a9653edde0ae5e87585bd049b10b2f290a5
+ARG SPCOD_PWA_REF=6d762d1435c294c835fce90cc497185e695eb361
 ARG NPM_REGISTRY
 WORKDIR /pwa
 # 使用 Node 自带的 HTTPS 下载，避免额外安装 git/ca-certificates；超时后自动重试。
